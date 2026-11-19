@@ -9,6 +9,7 @@
   "require": {
     "php": ">=8.2",
     "magento/framework": "*",
+    "magento/module-jwt-framework-adapter": "*",
     "magento/module-store": "*"
   },
   "autoload": {
