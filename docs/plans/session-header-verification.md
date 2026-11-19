@@ -115,13 +115,13 @@ requires.
 
 ### 6. Session records: `etc/db_schema.xml`, `Model/ResourceModel/Session`, `Model/Session/SessionRepository`, `Cron/CleanupSessions`
 - Table `brocode_poppy_session`: `entity_id`, `session_hash` (char 64, unique), `client_id`
-  (varchar 2048), `sid` (varchar 255), `user_id` (varchar 255), `agent_id` (nullable), `created_at`,
+  (varchar 2048), `sid` (varchar 256 — the session JWT schema allows `^[A-Za-z0-9_-]{22,256}$`), `user_id` (varchar 255), `agent_id` (nullable), `created_at`,
   `last_seen_at`, `ended_at` (nullable).
 - `SessionRepository::touch(VerifiedSession $s): void` — insert if absent, else update `last_seen_at`;
   throws `session_ended` when `ended_at` is set; throws `invalid_session` when the stored `agent_id`
   differs. Insert uses `insertOnDuplicate` (atomic).
 - `CleanupSessions::execute(): void`, daily.
-- Tests: `SessionRepositoryTest` with a mocked connection (insert path, ended path, agent mismatch);
+- Tests: `SessionRepositoryTest` with a mocked connection (insert path, ended path [session_ended], agent mismatch [invalid_session]);
   the DB round trip is covered by the validator's `session.continue` / `session.new-session`.
 
 ### 7. Tasks endpoint and wiring
@@ -168,7 +168,7 @@ requires.
 - 2. CompanyIdentity — inline — **done 2026-11-19**: 3 new tests (red first) + 10 existing green, phpcs 0/0, PHPStan L8 clean, DI compile OK, poppy.json unchanged, validator Foundation 13/0.
 - 3. Safe fetching — subagent `general-purpose` · opus, foreground — **done 2026-11-19**: 14 SafeFetcher tests (red first), 27 module tests green, phpcs 0/0, PHPStan L8 clean, DI compile OK. Added on review: NAT64 `64:ff9b::/96` refused, `User-Agent: BroCode-Poppy/0.1 (+https://brocode.at)`. `allow_private_addresses` (env.php) skips the whole public-address check, loopback included.
 - 4. Metadata resolver + JWS — subagent `general-purpose` · opus, foreground — **done 2026-11-19**: 30 tests (red first: 30/30 'not implemented'), 57 module tests green, phpcs 0/0, PHPStan L8 clean, DI compile OK. Magento `JwtManagerInterface` used (real adapter built in the unit test, signing via web-token). "Same domain" (4.1) read as exact lowercase host. Also refused: `crit`/`b64` headers, JWK `alg` ≠ header, `use` ≠ `sig`, P-256 coordinates ≠ 32 bytes. `module.xml` now sequences `Magento_JwtFrameworkAdapter`.
-- 5. SessionVerifier — subagent `general-purpose` · opus, foreground — done: ~26 tests green, red run recorded first.
+- 5. SessionVerifier — subagent `general-purpose` · opus, foreground — **done 2026-11-19**: 38 tests (red: 38/38 'not implemented'), 95 module tests green, mutations (delegation lifetime, `htu`) caught, phpcs 0/0, PHPStan L8 clean, DI compile OK. Verifier is storage-free: `session_ended` and agent-id mismatch move to step 6. Accepts `Poppy-Version` 1.x (spec 3.1/3.4); `sid` per schema `{22,256}`; block/allow list checked before any metadata fetch; delegation cache not built (optional).
 - 6. Session records + cron — subagent `general-purpose` · sonnet, foreground — done: `setup:upgrade` creates the table, 3 tests green.
 - 7. Tasks endpoint + wiring — inline — done: curl 400 without header, `tasks.endpoint` in `poppy.json`.
 - 8. Validator end-to-end — inline — done: validator exit 0 with the passes listed in step 8.
