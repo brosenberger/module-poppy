@@ -30,6 +30,7 @@ declare(strict_types=1);
 
 namespace BroCode\Poppy\Controller;
 
+use BroCode\Poppy\Controller\Api\Tasks;
 use BroCode\Poppy\Controller\WellKnown\Poppy;
 use Magento\Framework\App\ActionFactory;
 use Magento\Framework\App\ActionInterface;
@@ -38,11 +39,12 @@ use Magento\Framework\App\RequestInterface;
 use Magento\Framework\App\RouterInterface;
 
 /**
- * Maps /.well-known/poppy.json onto the controller; a dot-prefixed path cannot be a standard frontName.
+ * Maps /.well-known/poppy.json (a dot-prefixed path cannot be a standard frontName) and the Poppy API paths.
  */
 class Router implements RouterInterface
 {
     public const PATH = '/.well-known/poppy.json';
+    public const TASKS_PATH = '/poppy/v1/tasks';
 
     /**
      * @param ActionFactory $actionFactory
@@ -53,19 +55,37 @@ class Router implements RouterInterface
     }
 
     /**
-     * Match the exact well-known path, nothing else.
+     * Match the exact paths, nothing else.
      *
      * @param RequestInterface $request
      * @return ActionInterface|null
      */
     public function match(RequestInterface $request): ?ActionInterface
     {
-        if (!$request instanceof HttpRequest || $request->getPathInfo() !== self::PATH) {
+        if (!$request instanceof HttpRequest) {
             return null;
         }
 
-        $request->setModuleName('brocode_poppy')->setControllerName('wellknown')->setActionName('poppy');
+        return match ($request->getPathInfo()) {
+            self::PATH => $this->dispatch($request, 'wellknown', 'poppy', Poppy::class),
+            self::TASKS_PATH => $this->dispatch($request, 'api', 'tasks', Tasks::class),
+            default => null,
+        };
+    }
 
-        return $this->actionFactory->create(Poppy::class);
+    /**
+     * Set the route names on the request and create the action.
+     *
+     * @param HttpRequest $request
+     * @param string $controller
+     * @param string $action
+     * @param class-string<ActionInterface> $class
+     * @return ActionInterface
+     */
+    private function dispatch(HttpRequest $request, string $controller, string $action, string $class): ActionInterface
+    {
+        $request->setModuleName('brocode_poppy')->setControllerName($controller)->setActionName($action);
+
+        return $this->actionFactory->create($class);
     }
 }

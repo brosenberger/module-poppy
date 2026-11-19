@@ -32,6 +32,7 @@ namespace BroCode\Poppy\Model;
 
 use Magento\Framework\App\Config\ScopeConfigInterface;
 use Magento\Framework\Module\Manager as ModuleManager;
+use Magento\Framework\UrlInterface;
 use Magento\Store\Model\ScopeInterface;
 use Magento\Store\Model\Store;
 use Magento\Store\Model\StoreManagerInterface;
@@ -50,6 +51,8 @@ class DocumentBuilder
     private const XML_PATH_ORGANIZATION_NAME = 'brocode_poppy/general/organization_name';
     private const XML_PATH_LOGO_URI = 'brocode_poppy/general/logo_uri';
     private const XML_PATH_EXTENSION_UCP = 'brocode_poppy/extensions/ucp';
+    private const XML_PATH_SESSION_ENABLED = 'brocode_poppy/session/enabled';
+    private const TASKS_PATH = 'poppy/v1/tasks';
     private const XML_PATH_STORE_INFORMATION_NAME = 'general/store_information/name';
 
     /**
@@ -99,6 +102,13 @@ class DocumentBuilder
             // Empty object: the website is open to Personal Agents, without a browser-session endpoint.
             'web' => new \stdClass(),
         ];
+
+        if ($this->scopeConfig->isSetFlag(self::XML_PATH_SESSION_ENABLED, ScopeInterface::SCOPE_STORE)) {
+            // Link base URL, so a store code or base path stays in the URL the router and htu see.
+            $document['tasks'] = [
+                'endpoint' => $store->getBaseUrl(UrlInterface::URL_TYPE_LINK, true) . self::TASKS_PATH,
+            ];
+        }
 
         if ($this->scopeConfig->isSetFlag(self::XML_PATH_EXTENSION_UCP, ScopeInterface::SCOPE_STORE)
             && $this->isUcpProfileServed()

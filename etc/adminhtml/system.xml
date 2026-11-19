@@ -22,6 +22,24 @@
                     <comment>https only; anything else is left out.</comment>
                 </field>
             </group>
+            <group id="session" translate="label" sortOrder="15" showInDefault="1" showInWebsite="1" showInStore="1">
+                <label>Personal Agents</label>
+                <field id="enabled" translate="label comment" type="select" sortOrder="10" showInDefault="1" showInWebsite="1" showInStore="1">
+                    <label>Accept Personal Agent Sessions</label>
+                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
+                    <comment>Verifies the Poppy-Session header and lists the tasks endpoint (/poppy/v1/tasks) in poppy.json.</comment>
+                </field>
+                <field id="blocked_client_ids" translate="label comment" type="textarea" sortOrder="20" showInDefault="1" showInWebsite="1" showInStore="1">
+                    <label>Blocked Agents</label>
+                    <comment>One client_id URL per line. Refused with invalid_session.</comment>
+                    <depends><field id="enabled">1</field></depends>
+                </field>
+                <field id="allowed_client_ids" translate="label comment" type="textarea" sortOrder="30" showInDefault="1" showInWebsite="1" showInStore="1">
+                    <label>Allowed Agents</label>
+                    <comment>One client_id URL per line. Empty: every agent that passes verification.</comment>
+                    <depends><field id="enabled">1</field></depends>
+                </field>
+            </group>
             <group id="extensions" translate="label" sortOrder="20" showInDefault="1" showInWebsite="1" showInStore="1">
                 <label>Extensions</label>
                 <field id="ucp" translate="label comment" type="select" sortOrder="10" showInDefault="1" showInWebsite="1" showInStore="1">

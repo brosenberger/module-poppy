@@ -6,6 +6,9 @@
             <general>
                 <enabled>0</enabled>
             </general>
+            <session>
+                <enabled>0</enabled>
+            </session>
             <extensions>
                 <ucp>0</ucp>
             </extensions>

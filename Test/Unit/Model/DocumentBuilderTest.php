@@ -68,6 +68,7 @@ class DocumentBuilderTest extends TestCase
         $store = $this->createMock(Store::class);
         $store->method('getBaseUrl')->willReturnMap([
             [UrlInterface::URL_TYPE_WEB, true, $baseUrl],
+            [UrlInterface::URL_TYPE_LINK, true, rtrim($baseUrl, '/') . '/de/'],
         ]);
         $store->method('getFrontendName')->willReturn($frontendName);
 
@@ -186,6 +187,19 @@ class DocumentBuilderTest extends TestCase
         ], enabledModules: ['Angeo_Ucp'])->build();
 
         self::assertArrayNotHasKey('extensions', $doc);
+    }
+
+    public function testTasksEndpointListedOnlyWhenSessionsEnabled(): void
+    {
+        $on = $this->builder([
+            'brocode_poppy/general/enabled' => '1',
+            'brocode_poppy/session/enabled' => '1',
+        ], 'https://shop.example.com/')->build();
+        $off = $this->builder(['brocode_poppy/general/enabled' => '1'], 'https://shop.example.com/')->build();
+
+        // Link base URL (store code in URL here), so the path matches what the router and htu see.
+        self::assertSame(['endpoint' => 'https://shop.example.com/de/poppy/v1/tasks'], $on['tasks']);
+        self::assertArrayNotHasKey('tasks', $off);
     }
 
     public function testHttpBaseUrlIsNotPublished(): void
