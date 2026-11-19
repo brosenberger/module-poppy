@@ -42,7 +42,7 @@ requires.
 | `htu` | Built from the store's secure base URL + request path, query and fragment dropped | Kit: never from the `Host` header behind proxies |
 | Agent policy | Open by default; admin `blocked_client_ids` and `allowed_client_ids` (empty = all), newline lists; refused → `invalid_session` | Spec 4.1: each Company decides |
 | Access tokens | None issued. Any `Authorization: Bearer …` on a Poppy resource → 401, `WWW-Authenticate: Bearer error="invalid_token"`; a Session JWT carrying `ath` → `invalid_session`; `access_token` in the query is ignored | No issuer; validator `token.invented`, `token.in-url`, `session.ath-without-token` |
-| Session store | New table `brocode_poppy_session`, unique `session_hash = sha256(client_id ‖ sid ‖ sub)`; cron deletes rows idle > 30 days, ended rows kept 30 days so they keep answering `session_ended` | Kit pattern A; spec 5.5 "remember ended sids" |
+| Session store | New table `brocode_poppy_session`, unique `session_hash = sha256(client_id \n sid)` (no `sub`, so a known `sid` with another User ID is detectable and refused); cron deletes rows idle > 30 days, ended rows kept 30 days so they keep answering `session_ended` | Kit pattern A; spec 5.5 "remember ended sids" |
 | Tasks endpoint | `GET /poppy/v1/tasks` → `{"excluded_tasks": []}`, `Cache-Control: private, no-store`; listed in `poppy.json` as `tasks.endpoint` only while `brocode_poppy/session/enabled` = 1 | Smallest spec resource; makes the verifier testable end to end. Content comes with the feedback feature |
 | Logging | Never log the header or JWTs; log only `client_id` + failure code at debug | Spec 10.2 |
 
@@ -114,7 +114,7 @@ requires.
   `Poppy-Extensions: "ucp";v="1"` → `extensions === ['ucp' => '1']`.
 
 ### 6. Session records: `etc/db_schema.xml`, `Model/ResourceModel/Session`, `Model/Session/SessionRepository`, `Cron/CleanupSessions`
-- Table `brocode_poppy_session`: `entity_id`, `session_hash` (char 64, unique), `client_id`
+- Table `brocode_poppy_session`: `entity_id`, `session_hash` (varchar 64, unique, `sha256(client_id \n sid)`), `client_id`
   (varchar 2048), `sid` (varchar 256 — the session JWT schema allows `^[A-Za-z0-9_-]{22,256}$`), `user_id` (varchar 255), `agent_id` (nullable), `created_at`,
   `last_seen_at`, `ended_at` (nullable).
 - `SessionRepository::touch(VerifiedSession $s): void` — insert if absent, else update `last_seen_at`;
@@ -169,7 +169,7 @@ requires.
 - 3. Safe fetching — subagent `general-purpose` · opus, foreground — **done 2026-11-19**: 14 SafeFetcher tests (red first), 27 module tests green, phpcs 0/0, PHPStan L8 clean, DI compile OK. Added on review: NAT64 `64:ff9b::/96` refused, `User-Agent: BroCode-Poppy/0.1 (+https://brocode.at)`. `allow_private_addresses` (env.php) skips the whole public-address check, loopback included.
 - 4. Metadata resolver + JWS — subagent `general-purpose` · opus, foreground — **done 2026-11-19**: 30 tests (red first: 30/30 'not implemented'), 57 module tests green, phpcs 0/0, PHPStan L8 clean, DI compile OK. Magento `JwtManagerInterface` used (real adapter built in the unit test, signing via web-token). "Same domain" (4.1) read as exact lowercase host. Also refused: `crit`/`b64` headers, JWK `alg` ≠ header, `use` ≠ `sig`, P-256 coordinates ≠ 32 bytes. `module.xml` now sequences `Magento_JwtFrameworkAdapter`.
 - 5. SessionVerifier — subagent `general-purpose` · opus, foreground — **done 2026-11-19**: 38 tests (red: 38/38 'not implemented'), 95 module tests green, mutations (delegation lifetime, `htu`) caught, phpcs 0/0, PHPStan L8 clean, DI compile OK. Verifier is storage-free: `session_ended` and agent-id mismatch move to step 6. Accepts `Poppy-Version` 1.x (spec 3.1/3.4); `sid` per schema `{22,256}`; block/allow list checked before any metadata fetch; delegation cache not built (optional).
-- 6. Session records + cron — subagent `general-purpose` · sonnet, foreground — done: `setup:upgrade` creates the table, 3 tests green.
+- 6. Session records + cron — subagent `general-purpose` · sonnet, foreground — **done 2026-11-19**: 10 tests (red first), table created by `setup:upgrade`, real DB round trip (continue, other user_id → invalid_session, ended → session_ended, cron delete) with 0 rows left. Key changed to `sha256(client_id \n sid)`. Added on review: values longer than their columns (client_id 2048, user_id/agent_id 255; spec sets no limit) → `invalid_session` before any write. 107 module tests green, phpcs 0/0, PHPStan L8 clean, DI compile OK.
 - 7. Tasks endpoint + wiring — inline — done: curl 400 without header, `tasks.endpoint` in `poppy.json`.
 - 8. Validator end-to-end — inline — done: validator exit 0 with the passes listed in step 8.
 - 9. Quality gate + review — reviewer subagent `general-purpose` · opus · xhigh (security-relevant verification code, reviewing another agent's output) — done: no blocking findings; phpunit/phpcs/phpstan as in step 9.
