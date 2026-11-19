@@ -7,7 +7,7 @@
   "homepage": "https://brocode.at",
   "type": "magento2-module",
   "require": {
-    "php": ">=8.1",
+    "php": ">=8.2",
     "magento/framework": "*",
     "magento/module-store": "*"
   },

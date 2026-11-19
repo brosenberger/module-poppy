@@ -166,7 +166,7 @@ requires.
 
 - 1. Spike — inline — **done 2026-11-19**: ES256 + PS384 verify through `JwtManagerInterface`, all five attack variants rejected.
 - 2. CompanyIdentity — inline — **done 2026-11-19**: 3 new tests (red first) + 10 existing green, phpcs 0/0, PHPStan L8 clean, DI compile OK, poppy.json unchanged, validator Foundation 13/0.
-- 3. Safe fetching — subagent `general-purpose` · opus, foreground — done: `SafeFetcherTest` green (7 tests), phpcs clean. Opus: SSRF guard is security-critical code generation.
+- 3. Safe fetching — subagent `general-purpose` · opus, foreground — **done 2026-11-19**: 14 SafeFetcher tests (red first), 27 module tests green, phpcs 0/0, PHPStan L8 clean, DI compile OK. Added on review: NAT64 `64:ff9b::/96` refused, `User-Agent: BroCode-Poppy/0.1 (+https://brocode.at)`. `allow_private_addresses` (env.php) skips the whole public-address check, loopback included.
 - 4. Metadata resolver + JWS — subagent `general-purpose` · opus, foreground — done: 9 tests green.
 - 5. SessionVerifier — subagent `general-purpose` · opus, foreground — done: ~26 tests green, red run recorded first.
 - 6. Session records + cron — subagent `general-purpose` · sonnet, foreground — done: `setup:upgrade` creates the table, 3 tests green.
