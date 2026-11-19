@@ -33,13 +33,19 @@ namespace BroCode\Poppy\Model\Session;
 
 use BroCode\Poppy\Exception\SessionException;
 use BroCode\Poppy\Model\ResourceModel\Session as SessionResource;
+use Magento\Framework\App\Config\ScopeConfigInterface;
 use Magento\Framework\Stdlib\DateTime\DateTime;
 
 /**
  * Creates and continues Poppy Sessions (spec 5.3) and refuses ended or conflicting ones.
+ *
+ * New Sessions per client_id are capped per hour (brocode_poppy/session/max_new_sessions_per_hour),
+ * so one agent cannot fill the table; beyond the cap a new Session is refused as invalid_session.
  */
 class SessionRepository
 {
+    public const XML_PATH_MAX_NEW_SESSIONS = 'brocode_poppy/session/max_new_sessions_per_hour';
+    public const DEFAULT_MAX_NEW_SESSIONS = 1000;
     private const MAX_CLIENT_ID = 2048;
     private const MAX_USER_ID = 255;
     private const MAX_AGENT_ID = 255;
@@ -47,10 +53,12 @@ class SessionRepository
     /**
      * @param SessionResource $resource
      * @param DateTime $dateTime
+     * @param ScopeConfigInterface $scopeConfig
      */
     public function __construct(
         private readonly SessionResource $resource,
-        private readonly DateTime $dateTime
+        private readonly DateTime $dateTime,
+        private readonly ScopeConfigInterface $scopeConfig
     ) {
     }
 
@@ -65,19 +73,26 @@ class SessionRepository
     {
         $this->assertFitsColumns($session);
         $hash = hash('sha256', $session->clientId . "\n" . $session->sid);
+        $clientHash = hash('sha256', $session->clientId);
         $now = $this->dateTime->gmtDate();
 
-        $this->resource->insertIfAbsent([
-            'session_hash' => $hash,
-            'client_id' => $session->clientId,
-            'sid' => $session->sid,
-            'user_id' => $session->userId,
-            'agent_id' => $session->agentId,
-            'created_at' => $now,
-            'last_seen_at' => $now,
-        ]);
-
         $row = $this->resource->loadByHash($hash);
+        $inserted = false;
+        if ($row === null) {
+            $this->assertUnderNewSessionCap($clientHash);
+            $inserted = $this->resource->insertIfAbsent([
+                'session_hash' => $hash,
+                'client_hash' => $clientHash,
+                'client_id' => $session->clientId,
+                'sid' => $session->sid,
+                'user_id' => $session->userId,
+                'agent_id' => $session->agentId,
+                'created_at' => $now,
+                'last_seen_at' => $now,
+                'seen_count' => 1,
+            ]) === 1;
+            $row = $this->resource->loadByHash($hash);
+        }
         if ($row === null) {
             throw new SessionException(SessionException::INVALID_SESSION, 'Session could not be stored.');
         }
@@ -91,7 +106,32 @@ class SessionRepository
             );
         }
 
-        $this->resource->markSeen((int)$row['entity_id'], $now);
+        // A row this request inserted is already seen once; a concurrent insert counts as a visit.
+        if (!$inserted) {
+            $this->resource->markSeen((int)$row['entity_id'], $now);
+        }
+    }
+
+    /**
+     * Refuse a new Session once the client has started the configured number in the last hour.
+     *
+     * @param string $clientHash
+     * @return void
+     * @throws SessionException
+     */
+    private function assertUnderNewSessionCap(string $clientHash): void
+    {
+        $max = (int)$this->scopeConfig->getValue(self::XML_PATH_MAX_NEW_SESSIONS);
+        if ($max <= 0) {
+            $max = self::DEFAULT_MAX_NEW_SESSIONS;
+        }
+        $since = $this->dateTime->gmtDate('Y-m-d H:i:s', $this->dateTime->gmtTimestamp() - 3600);
+        if ($this->resource->countCreatedSince($clientHash, $since) >= $max) {
+            throw new SessionException(
+                SessionException::INVALID_SESSION,
+                'Personal Agent started too many Sessions in the last hour.'
+            );
+        }
     }
 
     /**

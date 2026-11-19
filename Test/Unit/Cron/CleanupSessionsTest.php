@@ -38,17 +38,29 @@ use PHPUnit\Framework\TestCase;
 
 class CleanupSessionsTest extends TestCase
 {
-    public function testCutoffsAreThirtyDaysBeforeNow(): void
+    public function testDeletesInBatchesUntilABatchIsNotFull(): void
     {
+        // F4: idle 30 days, ended 30 days, seen only once 24 hours; deleted 1000 rows at a time.
         $resource = $this->createMock(SessionResource::class);
         $dateTime = $this->createMock(DateTime::class);
         $dateTime->method('gmtTimestamp')->willReturn(1790900000); // 2026-10-02 00:13:20 UTC
-        $dateTime->expects($this->atLeastOnce())->method('gmtDate')
-            ->with('Y-m-d H:i:s', 1788308000) // 1790900000 - 30 * 86400
-            ->willReturn('2026-09-02 00:13:20');
-        $resource->expects($this->once())->method('deleteExpired')
-            ->with('2026-09-02 00:13:20', '2026-09-02 00:13:20')
-            ->willReturn(3);
+        $dateTime->method('gmtDate')->willReturnCallback(
+            static fn (string $format, int $timestamp) => gmdate($format, $timestamp)
+        );
+        $resource->expects($this->exactly(3))->method('deleteExpired')
+            ->with('2026-09-02 00:13:20', '2026-09-02 00:13:20', '2026-10-01 00:13:20', 1000)
+            ->willReturnOnConsecutiveCalls(1000, 1000, 3);
+
+        (new CleanupSessions($resource, $dateTime))->execute();
+    }
+
+    public function testStopsAfterTheBatchLimitPerRun(): void
+    {
+        $resource = $this->createMock(SessionResource::class);
+        $dateTime = $this->createMock(DateTime::class);
+        $dateTime->method('gmtTimestamp')->willReturn(1790900000);
+        $dateTime->method('gmtDate')->willReturn('2026-09-02 00:13:20');
+        $resource->expects($this->exactly(1000))->method('deleteExpired')->willReturn(1000);
 
         (new CleanupSessions($resource, $dateTime))->execute();
     }

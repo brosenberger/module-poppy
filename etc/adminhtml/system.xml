@@ -39,6 +39,18 @@
                     <comment>One client_id URL per line. Empty: every agent that passes verification.</comment>
                     <depends><field id="enabled">1</field></depends>
                 </field>
+                <field id="max_fetches_per_minute" translate="label comment" type="text" sortOrder="40" showInDefault="1" showInWebsite="1" showInStore="1">
+                    <label>Agent Metadata Fetches per Minute</label>
+                    <comment>Fetches of agent metadata and key sets not already cached, per store view. Beyond it, requests get HTTP 429 with Retry-After.</comment>
+                    <validate>required-entry validate-digits validate-greater-than-zero</validate>
+                    <depends><field id="enabled">1</field></depends>
+                </field>
+                <field id="max_new_sessions_per_hour" translate="label comment" type="text" sortOrder="50" showInDefault="1">
+                    <label>New Sessions per Agent per Hour</label>
+                    <comment>Per client_id. Beyond it, new Sessions are refused with invalid_session; Sessions seen only once are deleted after 24 hours.</comment>
+                    <validate>required-entry validate-digits validate-greater-than-zero</validate>
+                    <depends><field id="enabled">1</field></depends>
+                </field>
             </group>
             <group id="extensions" translate="label" sortOrder="20" showInDefault="1" showInWebsite="1" showInStore="1">
                 <label>Extensions</label>

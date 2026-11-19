@@ -35,6 +35,7 @@ use BroCode\Poppy\Exception\SessionException;
 use BroCode\Poppy\Model\ResourceModel\Session as SessionResource;
 use BroCode\Poppy\Model\Session\SessionRepository;
 use BroCode\Poppy\Model\Session\VerifiedSession;
+use Magento\Framework\App\Config\ScopeConfigInterface;
 use Magento\Framework\Stdlib\DateTime\DateTime;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -46,6 +47,8 @@ class SessionRepositoryTest extends TestCase
     /** sha256("https://agent.example/client\ns1234567890123456789012"), computed once with sha256sum */
     private const HASH = '49b7b4cff12e4fb1f5075de1bacfe9aba2df467a0e7888edd8d964e0b14978a4';
     private const NOW = '2026-11-19 10:00:00';
+    private const HOUR_AGO = '2026-11-19 09:00:00';
+    private const NOW_TS = 1795082400; // 2026-11-19 10:00:00 UTC
 
     /** @var SessionResource&MockObject */
     private $resource;
@@ -53,12 +56,26 @@ class SessionRepositoryTest extends TestCase
     /** @var SessionRepository */
     private $repository;
 
+    /** @var string|null brocode_poppy/session/max_new_sessions_per_hour */
+    private ?string $maxNewSessions = null;
+
     protected function setUp(): void
     {
         $this->resource = $this->createMock(SessionResource::class);
         $dateTime = $this->createMock(DateTime::class);
-        $dateTime->method('gmtDate')->willReturn(self::NOW);
-        $this->repository = new SessionRepository($this->resource, $dateTime);
+        $dateTime->method('gmtTimestamp')->willReturn(self::NOW_TS);
+        $dateTime->method('gmtDate')->willReturnCallback(
+            static fn (?string $format = null, $input = null) => $input === null
+                ? self::NOW
+                : gmdate($format ?? 'Y-m-d H:i:s', (int)$input)
+        );
+        $scopeConfig = $this->createMock(ScopeConfigInterface::class);
+        $scopeConfig->method('getValue')->willReturnCallback(
+            fn (string $path) => $path === 'brocode_poppy/session/max_new_sessions_per_hour'
+                ? $this->maxNewSessions
+                : null
+        );
+        $this->repository = new SessionRepository($this->resource, $dateTime, $scopeConfig);
     }
 
     private function session(string $userId = 'usr_1', ?string $agentId = 'agt_1'): VerifiedSession
@@ -81,18 +98,63 @@ class SessionRepositoryTest extends TestCase
         ];
     }
 
-    public function testNewSessionIsInsertedAndMarkedSeen(): void
+    public function testNewSessionIsInsertedAsSeenOnce(): void
     {
+        // F4 changed this flow: look up first, count against the hourly cap, insert with seen_count 1.
+        $this->resource->method('loadByHash')->willReturnOnConsecutiveCalls(null, $this->row());
+        $this->resource->method('countCreatedSince')->willReturn(0);
         $this->resource->expects($this->once())->method('insertIfAbsent')->with([
             'session_hash' => self::HASH,
+            'client_hash' => hash('sha256', self::CLIENT_ID),
             'client_id' => self::CLIENT_ID,
             'sid' => self::SID,
             'user_id' => 'usr_1',
             'agent_id' => 'agt_1',
             'created_at' => self::NOW,
             'last_seen_at' => self::NOW,
-        ]);
+            'seen_count' => 1,
+        ])->willReturn(1);
+        $this->resource->expects($this->never())->method('markSeen');
+
+        $this->repository->touch($this->session());
+    }
+
+    public function testNewSessionOverTheHourlyCapIsInvalidSession(): void
+    {
+        $this->resource->method('loadByHash')->willReturn(null);
+        $this->resource->expects($this->once())->method('countCreatedSince')
+            ->with(hash('sha256', self::CLIENT_ID), self::HOUR_AGO)
+            ->willReturn(1000);
+        $this->resource->expects($this->never())->method('insertIfAbsent');
+
+        $this->assertRefused(SessionException::INVALID_SESSION, $this->session());
+    }
+
+    public function testHourlyCapIsConfigurable(): void
+    {
+        $this->maxNewSessions = '5';
+        $this->resource->method('loadByHash')->willReturnOnConsecutiveCalls(null, $this->row(), null);
+        $this->resource->method('countCreatedSince')->willReturnOnConsecutiveCalls(4, 5);
+        $this->resource->expects($this->once())->method('insertIfAbsent')->willReturn(1);
+
+        $this->repository->touch($this->session());
+        $this->assertRefused(SessionException::INVALID_SESSION, $this->session());
+    }
+
+    public function testKnownSessionIsNotCountedAgainstTheCap(): void
+    {
         $this->resource->method('loadByHash')->willReturn($this->row());
+        $this->resource->expects($this->never())->method('countCreatedSince');
+        $this->resource->expects($this->never())->method('insertIfAbsent');
+
+        $this->repository->touch($this->session());
+    }
+
+    public function testSessionInsertedByAConcurrentRequestIsMarkedSeen(): void
+    {
+        $this->resource->method('loadByHash')->willReturnOnConsecutiveCalls(null, $this->row());
+        $this->resource->method('countCreatedSince')->willReturn(0);
+        $this->resource->method('insertIfAbsent')->willReturn(0);
         $this->resource->expects($this->once())->method('markSeen')->with(42, self::NOW);
 
         $this->repository->touch($this->session());

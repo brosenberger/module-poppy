@@ -32,6 +32,7 @@ declare(strict_types=1);
 namespace BroCode\Poppy\Test\Unit\Model\Session;
 
 use BroCode\Poppy\Exception\ClientMetadataException;
+use BroCode\Poppy\Exception\RateLimitException;
 use BroCode\Poppy\Exception\SessionException;
 use BroCode\Poppy\Model\Agent\ClientMetadata;
 use BroCode\Poppy\Model\Agent\ClientMetadataResolver;
@@ -60,6 +61,7 @@ use Magento\JwtFrameworkAdapter\Model\JwsSerializerPoolFactory;
 use Magento\JwtFrameworkAdapter\Model\JwtManager;
 use Magento\JwtFrameworkAdapter\Model\UnsecuredJwtManager;
 use PHPUnit\Framework\TestCase;
+use Psr\Log\LoggerInterface;
 
 /**
  * Real cryptography: Session JWTs and delegations are signed with web-token and verified through
@@ -90,6 +92,26 @@ class SessionVerifierTest extends TestCase
      * @var string[] client_ids the resolver mock was asked for
      */
     private array $resolved = [];
+
+    /**
+     * @var string[] client_ids the resolver mock was asked to refresh
+     */
+    private array $refreshes = [];
+
+    /**
+     * @var array<string,array<string,mixed>> Keys the agent's jwks_uri adds after a key rotation
+     */
+    private array $rotatedKeys = [];
+
+    /**
+     * @var \Throwable|null Thrown by the resolver mock
+     */
+    private ?\Throwable $resolverError = null;
+
+    /**
+     * @var array<int,array{0:string,1:string,2:array<string,mixed>}> Log calls: level, message, context
+     */
+    private array $logs = [];
 
     /**
      * Shared key by name: agent EC and RSA (in jwks_uri), delegated EC, stranger EC.
@@ -274,17 +296,25 @@ class SessionVerifierTest extends TestCase
         );
 
         $resolver = $this->createMock(ClientMetadataResolver::class);
-        $resolver->method('resolve')->willReturnCallback(function (string $clientId) use ($resolverFails) {
-            $this->resolved[] = $clientId;
-            if ($resolverFails) {
-                throw new ClientMetadataException('jwks_uri unreachable');
-            }
+        $resolver->method('resolve')->willReturnCallback(
+            function (string $clientId, bool $refresh = false) use ($resolverFails) {
+                $this->resolved[] = $clientId;
+                if ($refresh) {
+                    $this->refreshes[] = $clientId;
+                }
+                if ($resolverFails) {
+                    throw new ClientMetadataException('jwks_uri unreachable');
+                }
+                if ($this->resolverError !== null) {
+                    throw $this->resolverError;
+                }
 
-            return new ClientMetadata($clientId, [
-                self::EC_KID => self::publicJwk(self::key('ec'), self::EC_KID),
-                self::RSA_KID => self::publicJwk(self::key('rsa'), self::RSA_KID),
-            ], 300);
-        });
+                return new ClientMetadata($clientId, [
+                    self::EC_KID => self::publicJwk(self::key('ec'), self::EC_KID),
+                    self::RSA_KID => self::publicJwk(self::key('rsa'), self::RSA_KID),
+                ] + ($refresh ? $this->rotatedKeys : []), 300);
+            }
+        );
 
         $identity = $this->createMock(CompanyIdentity::class);
         $identity->method('identifier')->willReturn(self::COMPANY);
@@ -297,29 +327,47 @@ class SessionVerifierTest extends TestCase
         $clock = $this->createMock(DateTime::class);
         $clock->method('gmtTimestamp')->willReturn(self::NOW);
 
+        $logger = $this->createMock(LoggerInterface::class);
+        foreach (['debug', 'info', 'notice', 'warning', 'error', 'critical'] as $level) {
+            $logger->method($level)->willReturnCallback(
+                function (string $message, array $context = []) use ($level): void {
+                    $this->logs[] = [$level, $message, $context];
+                }
+            );
+        }
+
         return new SessionVerifier(
             $resolver,
             new \BroCode\Poppy\Model\Jose\JwsVerifier($jwtManager, new MagentoJwkFactory()),
             $identity,
             $scopeConfig,
-            $clock
+            $clock,
+            $logger
         );
     }
 
     /**
-     * Assert the request is refused with the error code.
+     * Assert the request is refused with the error code, by the check whose message contains $check.
      *
      * @param string $code
      * @param HttpRequest $request
      * @param SessionVerifier|null $verifier
+     * @param string|null $check Fragment of the refusing check's message
      * @return void
      */
-    private function assertRefused(string $code, HttpRequest $request, ?SessionVerifier $verifier = null): void
-    {
+    private function assertRefused(
+        string $code,
+        HttpRequest $request,
+        ?SessionVerifier $verifier = null,
+        ?string $check = null
+    ): void {
         try {
             ($verifier ?? $this->verifier())->verify($request);
         } catch (SessionException $e) {
             $this->assertSame($code, $e->getErrorCode());
+            if ($check !== null) {
+                $this->assertStringContainsString($check, $e->getMessage(), 'Refused by another check.');
+            }
 
             return;
         }
@@ -328,24 +376,39 @@ class SessionVerifierTest extends TestCase
 
     public function testMissingHeaderIsInvalidSession(): void
     {
-        $this->assertRefused('invalid_session', $this->request(null));
+        $this->assertRefused('invalid_session', $this->request(null), null, 'Poppy-Session header missing');
     }
 
     public function testTypNotSessionJwtIsInvalidSession(): void
     {
-        $this->assertRefused('invalid_session', $this->request($this->sessionJwt(['typ' => 'JWT'])));
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt(['typ' => 'JWT'])),
+            null,
+            'typ is not poppy-session+jwt'
+        );
     }
 
     public function testSignedByKeyTheDelegationDoesNotNameIsInvalidSession(): void
     {
-        $this->assertRefused('invalid_session', $this->request($this->sessionJwt([], [], self::key('stranger'))));
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt([], [], self::key('stranger'))),
+            null,
+            'Session JWT signature refused'
+        );
     }
 
     public function testKidNotThumbprintOfDelegatedKeyIsInvalidSession(): void
     {
         $kid = self::key('stranger')->thumbprint('sha256');
 
-        $this->assertRefused('invalid_session', $this->request($this->sessionJwt(['kid' => $kid])));
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt(['kid' => $kid])),
+            null,
+            'kid is not the delegated key thumbprint'
+        );
     }
 
     public function testSignedDirectlyWithJwksKeyIsInvalidSession(): void
@@ -356,28 +419,43 @@ class SessionVerifierTest extends TestCase
             self::key('ec')
         );
 
-        $this->assertRefused('invalid_session', $this->request($jwt));
+        $this->assertRefused('invalid_session', $this->request($jwt), null, 'carries no delegation');
     }
 
     public function testDelegationSignedByAnotherKeyIsInvalidSession(): void
     {
         $delegation = $this->delegation([], [], self::key('stranger'));
 
-        $this->assertRefused('invalid_session', $this->request($this->sessionJwt(['poppy_dlg' => $delegation])));
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt(['poppy_dlg' => $delegation])),
+            null,
+            'Delegation signature refused'
+        );
     }
 
     public function testExpiredDelegationIsInvalidSession(): void
     {
         $delegation = $this->delegation([], ['iat' => self::NOW - 7200, 'exp' => self::NOW - 3600]);
 
-        $this->assertRefused('invalid_session', $this->request($this->sessionJwt(['poppy_dlg' => $delegation])));
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt(['poppy_dlg' => $delegation])),
+            null,
+            'Delegation has expired'
+        );
     }
 
     public function testDelegationLifetimeOver24HoursIsInvalidSession(): void
     {
         $delegation = $this->delegation([], ['iat' => self::NOW - 60, 'exp' => self::NOW - 60 + 86401]);
 
-        $this->assertRefused('invalid_session', $this->request($this->sessionJwt(['poppy_dlg' => $delegation])));
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt(['poppy_dlg' => $delegation])),
+            null,
+            'longer than 24 hours'
+        );
     }
 
     public function testDelegationLifetimeOfExactly24HoursIsAccepted(): void
@@ -394,28 +472,48 @@ class SessionVerifierTest extends TestCase
         // Otherwise a far-future iat would stretch the 24 h limit: exp is only bounded relative to iat.
         $delegation = $this->delegation([], ['iat' => self::NOW + 86400 * 365, 'exp' => self::NOW + 86400 * 366]);
 
-        $this->assertRefused('invalid_session', $this->request($this->sessionJwt(['poppy_dlg' => $delegation])));
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt(['poppy_dlg' => $delegation])),
+            null,
+            'Delegation issued in the future'
+        );
     }
 
     public function testDelegationTypWrongIsInvalidSession(): void
     {
         $delegation = $this->delegation(['typ' => 'JWT']);
 
-        $this->assertRefused('invalid_session', $this->request($this->sessionJwt(['poppy_dlg' => $delegation])));
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt(['poppy_dlg' => $delegation])),
+            null,
+            'Delegation typ'
+        );
     }
 
     public function testDelegationIssNotJwtIssIsInvalidSession(): void
     {
         $delegation = $this->delegation([], ['iss' => 'https://other-agent.test/agent.json']);
 
-        $this->assertRefused('invalid_session', $this->request($this->sessionJwt(['poppy_dlg' => $delegation])));
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt(['poppy_dlg' => $delegation])),
+            null,
+            'Delegation iss'
+        );
     }
 
     public function testDelegationKidNotInJwksIsInvalidSession(): void
     {
         $delegation = $this->delegation(['kid' => 'validator-unknown']);
 
-        $this->assertRefused('invalid_session', $this->request($this->sessionJwt(['poppy_dlg' => $delegation])));
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt(['poppy_dlg' => $delegation])),
+            null,
+            'Delegation kid names no key'
+        );
     }
 
     public function testDelegatedKeyWithPrivateMembersIsInvalidSession(): void
@@ -429,36 +527,56 @@ class SessionVerifierTest extends TestCase
             'd' => $delegated['d'],
         ]]]);
 
-        $this->assertRefused('invalid_session', $this->request($this->sessionJwt(['poppy_dlg' => $delegation])));
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt(['poppy_dlg' => $delegation])),
+            null,
+            'cnf.jwk'
+        );
     }
 
     public function testMissingSubIsInvalidSession(): void
     {
-        $this->assertRefused('invalid_session', $this->request($this->sessionJwt([], ['sub' => null])));
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt([], ['sub' => null])),
+            null,
+            'has no sub'
+        );
     }
 
     public function testAudWithTrailingSlashIsInvalidSession(): void
     {
-        $this->assertRefused('invalid_session', $this->request($this->sessionJwt([], ['aud' => self::COMPANY . '/'])));
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt([], ['aud' => self::COMPANY . '/'])),
+            null,
+            'aud is not this Company'
+        );
     }
 
     public function testHtmPostOnGetIsInvalidSession(): void
     {
-        $this->assertRefused('invalid_session', $this->request($this->sessionJwt([], ['htm' => 'POST'])));
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt([], ['htm' => 'POST'])),
+            null,
+            'htm does not match'
+        );
     }
 
     public function testHtuOtherPathIsInvalidSession(): void
     {
         $jwt = $this->sessionJwt([], ['htu' => self::COMPANY . '/poppy-validator/other-path']);
 
-        $this->assertRefused('invalid_session', $this->request($jwt));
+        $this->assertRefused('invalid_session', $this->request($jwt), null, 'htu does not match');
     }
 
     public function testHtuOtherHostIsInvalidSession(): void
     {
         $jwt = $this->sessionJwt([], ['htu' => 'https://evil.example.com' . self::PATH]);
 
-        $this->assertRefused('invalid_session', $this->request($jwt));
+        $this->assertRefused('invalid_session', $this->request($jwt), null, 'htu does not match');
     }
 
     public function testQueryStringOnRequestIsIgnoredForHtu(): void
@@ -472,12 +590,22 @@ class SessionVerifierTest extends TestCase
 
     public function testIatAnHourOldIsInvalidSession(): void
     {
-        $this->assertRefused('invalid_session', $this->request($this->sessionJwt([], ['iat' => self::NOW - 3600])));
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt([], ['iat' => self::NOW - 3600])),
+            null,
+            'iat outside'
+        );
     }
 
     public function testIatOneMinuteInTheFutureIsInvalidSession(): void
     {
-        $this->assertRefused('invalid_session', $this->request($this->sessionJwt([], ['iat' => self::NOW + 60])));
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt([], ['iat' => self::NOW + 60])),
+            null,
+            'iat outside'
+        );
     }
 
     public function testIatAtWindowEdgesIsAccepted(): void
@@ -495,22 +623,27 @@ class SessionVerifierTest extends TestCase
     {
         $ath = 'fUHyO2r2Z3DZ53EsNrWBb0xWXoaNy59IiKCAqksmQEo';
 
-        $this->assertRefused('invalid_session', $this->request($this->sessionJwt([], ['ath' => $ath])));
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt([], ['ath' => $ath])),
+            null,
+            'ath without'
+        );
     }
 
     public function testPoppyVersionMissingIsVersionUnsupported(): void
     {
-        $this->assertRefused('version_unsupported', $this->request($this->sessionJwt(), null));
+        $this->assertRefused('version_unsupported', $this->request($this->sessionJwt(), null), null, 'Poppy-Version');
     }
 
     public function testPoppyVersion20IsVersionUnsupported(): void
     {
-        $this->assertRefused('version_unsupported', $this->request($this->sessionJwt(), '2.0'));
+        $this->assertRefused('version_unsupported', $this->request($this->sessionJwt(), '2.0'), null, 'Poppy-Version');
     }
 
     public function testPoppyVersion00IsVersionUnsupported(): void
     {
-        $this->assertRefused('version_unsupported', $this->request($this->sessionJwt(), '0.0'));
+        $this->assertRefused('version_unsupported', $this->request($this->sessionJwt(), '0.0'), null, 'Poppy-Version');
     }
 
     public function testCompatibleMinorVersionIsAccepted(): void
@@ -525,7 +658,7 @@ class SessionVerifierTest extends TestCase
     {
         $verifier = $this->verifier([self::BLOCKED_PATH => "https://spam.example/agent.json\n" . self::CLIENT_ID]);
 
-        $this->assertRefused('invalid_session', $this->request($this->sessionJwt()), $verifier);
+        $this->assertRefused('invalid_session', $this->request($this->sessionJwt()), $verifier, 'is blocked');
         $this->assertSame([], $this->resolved, 'A blocked client is refused before its metadata is fetched.');
     }
 
@@ -533,7 +666,7 @@ class SessionVerifierTest extends TestCase
     {
         $verifier = $this->verifier([self::ALLOWED_PATH => 'https://friend.example/agent.json']);
 
-        $this->assertRefused('invalid_session', $this->request($this->sessionJwt()), $verifier);
+        $this->assertRefused('invalid_session', $this->request($this->sessionJwt()), $verifier, 'not on the allowlist');
     }
 
     public function testAllowlistWithClientIsAccepted(): void
@@ -547,7 +680,12 @@ class SessionVerifierTest extends TestCase
 
     public function testResolverFailureIsInvalidSession(): void
     {
-        $this->assertRefused('invalid_session', $this->request($this->sessionJwt()), $this->verifier([], true));
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt()),
+            $this->verifier([], true),
+            'Client metadata refused'
+        );
     }
 
     public function testValidEs256DelegationReturnsVerifiedSession(): void
@@ -605,5 +743,170 @@ class SessionVerifierTest extends TestCase
         $request = $this->request($this->sessionJwt(), '1.0', 'GET', self::PATH, '"ucp";v="1", "links;v="1"');
 
         $this->assertSame([], $this->verifier()->verify($request)->extensions);
+    }
+
+    public function testWrongUnverifiedClaimsAreRefusedBeforeAnyFetch(): void
+    {
+        // F3: without a signature nothing may cost an outbound fetch, so these come first.
+        $cases = [
+            'typ' => [['typ' => 'JWT'], [], '1.0'],
+            'aud' => [[], ['aud' => 'https://other.example.com'], '1.0'],
+            'htm' => [[], ['htm' => 'POST'], '1.0'],
+            'htu' => [[], ['htu' => self::COMPANY . '/other'], '1.0'],
+            'iat' => [[], ['iat' => self::NOW - 3600], '1.0'],
+            'sid' => [[], ['sid' => 'short'], '1.0'],
+            'ath' => [[], ['ath' => 'fUHyO2r2Z3DZ53EsNrWBb0xWXoaNy59IiKCAqksmQEo'], '1.0'],
+            'version' => [[], [], '2.0'],
+        ];
+        foreach ($cases as $name => [$header, $claims, $version]) {
+            $this->resolved = [];
+            try {
+                $this->verifier()->verify($this->request($this->sessionJwt($header, $claims), $version));
+                $this->fail('Expected a refusal for ' . $name);
+            } catch (SessionException $e) {
+                $this->assertSame([], $this->resolved, 'Metadata fetched before refusing ' . $name);
+            }
+        }
+    }
+
+    public function testUnknownDelegationKidRefetchesTheKeySetOnce(): void
+    {
+        // F10: the agent may have rotated its keys since its key set was cached.
+        $this->rotatedKeys = ['agent-ec-2' => self::publicJwk(self::key('ec2'), 'agent-ec-2')];
+        $delegation = $this->delegation(['kid' => 'agent-ec-2'], [], self::key('ec2'));
+
+        $session = $this->verifier()->verify($this->request($this->sessionJwt(['poppy_dlg' => $delegation])));
+
+        $this->assertSame(self::SID, $session->sid);
+        $this->assertSame([self::CLIENT_ID], $this->refreshes);
+    }
+
+    public function testKidStillUnknownAfterRefetchIsInvalidSession(): void
+    {
+        $delegation = $this->delegation(['kid' => 'validator-unknown']);
+
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt(['poppy_dlg' => $delegation])),
+            null,
+            'Delegation kid names no key'
+        );
+        $this->assertSame([self::CLIENT_ID], $this->refreshes);
+    }
+
+    public function testKnownKidDoesNotRefetch(): void
+    {
+        $this->verifier()->verify($this->request($this->sessionJwt()));
+
+        $this->assertSame([], $this->refreshes);
+    }
+
+    public function testFetchCapIsNotTurnedIntoInvalidSession(): void
+    {
+        $this->resolverError = new RateLimitException(17);
+
+        $this->expectException(RateLimitException::class);
+        $this->verifier()->verify($this->request($this->sessionJwt()));
+    }
+
+    public function testSidWithTrailingNewlineIsInvalidSession(): void
+    {
+        // F8: '$' matches before a final newline; '\z' does not.
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt([], ['sid' => self::SID . "\n"])),
+            null,
+            'sid missing or malformed'
+        );
+    }
+
+    public function testVersionWithTrailingNewlineIsVersionUnsupported(): void
+    {
+        $this->assertRefused(
+            'version_unsupported',
+            $this->request($this->sessionJwt(), "1.0\n"),
+            null,
+            'Poppy-Version'
+        );
+    }
+
+    public function testPs384SessionJwtIsInvalidSession(): void
+    {
+        // Delegations may be PS384, Session JWTs only ES256 (spec 5.2).
+        $rsa = self::key('rsa')->toPublic()->all();
+        $delegation = $this->delegation([], ['cnf' => ['jwk' => ['kty' => 'RSA', 'n' => $rsa['n'], 'e' => $rsa['e']]]]);
+        $jwt = $this->sessionJwt(
+            ['alg' => 'PS384', 'kid' => self::key('rsa')->thumbprint('sha256'), 'poppy_dlg' => $delegation],
+            [],
+            self::key('rsa')
+        );
+
+        $this->assertRefused('invalid_session', $this->request($jwt), null, 'Session JWT signature refused');
+    }
+
+    public function testMalformedSidIsInvalidSession(): void
+    {
+        foreach (['short', str_repeat('a', 21), 'Yx2b7Qd.Kp8mR3vT1nWc4A', str_repeat('a', 257)] as $sid) {
+            $this->assertRefused(
+                'invalid_session',
+                $this->request($this->sessionJwt([], ['sid' => $sid])),
+                null,
+                'sid missing or malformed'
+            );
+        }
+    }
+
+    public function testMissingJtiIsInvalidSession(): void
+    {
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt([], ['jti' => null])),
+            null,
+            'has no jti'
+        );
+    }
+
+    public function testArrayAudIsInvalidSession(): void
+    {
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt([], ['aud' => [self::COMPANY]])),
+            null,
+            'aud is not this Company'
+        );
+    }
+
+    public function testDelegationWithoutCnfIsInvalidSession(): void
+    {
+        $delegation = $this->delegation([], ['cnf' => null]);
+
+        $this->assertRefused(
+            'invalid_session',
+            $this->request($this->sessionJwt(['poppy_dlg' => $delegation])),
+            null,
+            'cnf.jwk'
+        );
+    }
+
+    public function testRefusalIsLoggedAtDebugWithClientIdAndCodeOnly(): void
+    {
+        $jwt = $this->sessionJwt([], ['htm' => 'POST']);
+
+        $this->assertRefused('invalid_session', $this->request($jwt));
+
+        $this->assertCount(1, $this->logs);
+        [$level, $message, $context] = $this->logs[0];
+        $this->assertSame('debug', $level);
+        $this->assertSame(['client_id' => self::CLIENT_ID, 'error' => 'invalid_session'], $context);
+        foreach (explode('.', $jwt) as $segment) {
+            $this->assertStringNotContainsString($segment, $message);
+        }
+    }
+
+    public function testAcceptedSessionIsNotLogged(): void
+    {
+        $this->verifier()->verify($this->request($this->sessionJwt()));
+
+        $this->assertSame([], $this->logs);
     }
 }

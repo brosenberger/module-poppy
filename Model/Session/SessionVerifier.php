@@ -33,8 +33,8 @@ namespace BroCode\Poppy\Model\Session;
 
 use BroCode\Poppy\Exception\ClientMetadataException;
 use BroCode\Poppy\Exception\JoseException;
+use BroCode\Poppy\Exception\RateLimitException;
 use BroCode\Poppy\Exception\SessionException;
-use BroCode\Poppy\Model\Agent\ClientMetadata;
 use BroCode\Poppy\Model\Agent\ClientMetadataResolver;
 use BroCode\Poppy\Model\CompanyIdentity;
 use BroCode\Poppy\Model\Jose\JwsVerifier;
@@ -42,15 +42,19 @@ use Magento\Framework\App\Config\ScopeConfigInterface;
 use Magento\Framework\App\Request\Http as HttpRequest;
 use Magento\Framework\Stdlib\DateTime\DateTime;
 use Magento\Store\Model\ScopeInterface;
+use Psr\Log\LoggerInterface;
 
 /**
  * Verifies the Poppy-Session header (spec 5.2, 5.3) and Poppy-Version (3.4) of one request, for a
  * Company without an OAuth issuer.
  *
- * Order (kit patterns/session-header.md): agent policy and client metadata, delegation, Session JWT
- * signature and kid, typ and claims, ath, then Poppy-Version. The Session lookup (step 6, ended
- * Sessions) belongs to the repository. Nothing is cached here; metadata caching is the resolver's.
- * Exception messages name the failed check only, never token contents.
+ * Order: first everything that costs nothing, on the still UNVERIFIED token (typ, claims, ath,
+ * Poppy-Version, a delegation present), then the agent policy, and only then client metadata (an
+ * outbound fetch), the delegation, the Session JWT signature and kid, and the claims once more on the
+ * verified token. So a request nobody signed cannot make the store fetch anything unless it would
+ * pass every other check. The Session lookup (ended Sessions) belongs to the repository. Exception
+ * messages name the failed check only, never token contents; refusals are logged at debug level with
+ * the client_id and error code only.
  */
 class SessionVerifier
 {
@@ -75,8 +79,13 @@ class SessionVerifier
     private const DELEGATION_TYP = 'poppy-delegation+jwt';
     private const DELEGATION_ALGS = ['ES256', 'PS384'];
     private const SESSION_ALGS = ['ES256'];
-    private const SID_PATTERN = '/^[A-Za-z0-9_-]{22,256}$/';
-    private const VERSION_PATTERN = '/^1\.(0|[1-9][0-9]{0,8})$/';
+    private const SID_PATTERN = '/^[A-Za-z0-9_-]{22,256}\z/';
+    private const VERSION_PATTERN = '/^1\.(0|[1-9][0-9]{0,8})\z/';
+
+    /**
+     * Longest client_id written to the log.
+     */
+    private const MAX_LOGGED_CLIENT_ID = 2048;
 
     /**
      * JWK members that hold private or symmetric key material (RFC 7518 6.2.2, 6.3.2, 6.4.1).
@@ -89,13 +98,15 @@ class SessionVerifier
      * @param CompanyIdentity $companyIdentity
      * @param ScopeConfigInterface $scopeConfig
      * @param DateTime $dateTime
+     * @param LoggerInterface $logger
      */
     public function __construct(
         private readonly ClientMetadataResolver $metadataResolver,
         private readonly JwsVerifier $jwsVerifier,
         private readonly CompanyIdentity $companyIdentity,
         private readonly ScopeConfigInterface $scopeConfig,
-        private readonly DateTime $dateTime
+        private readonly DateTime $dateTime,
+        private readonly LoggerInterface $logger
     ) {
     }
 
@@ -105,8 +116,49 @@ class SessionVerifier
      * @param HttpRequest $request
      * @return VerifiedSession
      * @throws SessionException
+     * @throws RateLimitException when client metadata would have to be fetched over the budget
      */
     public function verify(HttpRequest $request): VerifiedSession
+    {
+        try {
+            return $this->check($request);
+        } catch (SessionException $e) {
+            // Never the header or a token (spec 10.2): the unverified client_id and the code only.
+            $this->logger->debug('Poppy Session refused.', [
+                'client_id' => $this->loggableClientId($request),
+                'error' => $e->getErrorCode(),
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * The unverified iss of the request's Session JWT, shortened for the log; null when there is none.
+     *
+     * @param HttpRequest $request
+     * @return string|null
+     */
+    private function loggableClientId(HttpRequest $request): ?string
+    {
+        $compact = $request->getHeader(self::HEADER_SESSION);
+        try {
+            $iss = is_string($compact) ? $this->unverifiedClaims($compact)['iss'] : null;
+        } catch (SessionException $e) {
+            return null;
+        }
+
+        return is_string($iss) ? substr($iss, 0, self::MAX_LOGGED_CLIENT_ID) : null;
+    }
+
+    /**
+     * Run every check in order.
+     *
+     * @param HttpRequest $request
+     * @return VerifiedSession
+     * @throws SessionException
+     * @throws RateLimitException
+     */
+    private function check(HttpRequest $request): VerifiedSession
     {
         $compact = $request->getHeader(self::HEADER_SESSION);
         if (!is_string($compact) || $compact === '') {
@@ -114,33 +166,39 @@ class SessionVerifier
         }
         $now = (int)$this->dateTime->gmtTimestamp();
 
+        // UNVERIFIED: checks that cost nothing come before any fetch; repeated once verified.
         try {
-            // UNVERIFIED: only to pick the agent and the delegation; both are verified below.
             $header = $this->jwsVerifier->readHeader($compact);
-            $clientId = $this->unverifiedIssuer($compact);
-            $this->assertAgentAllowed($clientId);
-            $metadata = $this->metadataResolver->resolve($clientId);
-            $delegatedKey = $this->verifyDelegation($header['poppy_dlg'] ?? null, $metadata, $now);
-
-            [$header, $claims] = $this->jwsVerifier->verify($compact, $delegatedKey, self::SESSION_ALGS);
-            if (($header['kid'] ?? null) !== $this->jwsVerifier->thumbprint($delegatedKey)) {
-                throw $this->invalid('Session JWT kid is not the delegated key thumbprint.');
-            }
         } catch (JoseException $e) {
-            throw $this->invalid('Session JWT or delegation refused.', $e);
+            throw $this->invalid('Session JWT malformed.', $e);
+        }
+        $claims = $this->unverifiedClaims($compact);
+        $clientId = (string)$claims['iss'];
+        $this->checkTyp($header);
+        $this->checkClaims($claims, $clientId, $request, $now);
+        $this->checkVersion($request);
+        $delegation = $header['poppy_dlg'] ?? null;
+        if (!is_string($delegation) || $delegation === '') {
+            throw $this->invalid('Session JWT carries no delegation.');
+        }
+        $this->assertAgentAllowed($clientId);
+
+        try {
+            $delegatedKey = $this->verifyDelegation($delegation, $clientId, $now);
         } catch (ClientMetadataException $e) {
             throw $this->invalid('Client metadata refused.', $e);
         }
-
-        if (($header['typ'] ?? null) !== self::SESSION_TYP) {
-            throw $this->invalid('Session JWT typ is not poppy-session+jwt.');
+        try {
+            [$header, $claims] = $this->jwsVerifier->verify($compact, $delegatedKey, self::SESSION_ALGS);
+            $thumbprint = $this->jwsVerifier->thumbprint($delegatedKey);
+        } catch (JoseException $e) {
+            throw $this->invalid('Session JWT signature refused.', $e);
         }
+        if (($header['kid'] ?? null) !== $thumbprint) {
+            throw $this->invalid('Session JWT kid is not the delegated key thumbprint.');
+        }
+        $this->checkTyp($header);
         $session = $this->checkClaims($claims, $clientId, $request, $now);
-
-        $version = $request->getHeader(self::HEADER_VERSION);
-        if (!is_string($version) || !preg_match(self::VERSION_PATTERN, $version)) {
-            throw new SessionException(SessionException::VERSION_UNSUPPORTED, 'Poppy-Version missing or not served.');
-        }
 
         $extensions = $request->getHeader(self::HEADER_EXTENSIONS);
 
@@ -154,13 +212,13 @@ class SessionVerifier
     }
 
     /**
-     * The Session JWT's iss before verification, so its metadata can be fetched.
+     * The Session JWT's claims before verification, with a non-empty string iss.
      *
      * @param string $compact
-     * @return string
+     * @return array<string,mixed>
      * @throws SessionException
      */
-    private function unverifiedIssuer(string $compact): string
+    private function unverifiedClaims(string $compact): array
     {
         $payload = explode('.', $compact)[1] ?? '';
         // phpcs:ignore Magento2.Functions.DiscouragedFunction -- decoding JOSE data, not obfuscation
@@ -170,12 +228,43 @@ class SessionVerifier
         } catch (\JsonException $e) {
             $claims = null;
         }
-        $iss = is_array($claims) ? ($claims['iss'] ?? null) : null;
-        if (!is_string($iss) || $iss === '') {
+        if (!is_array($claims)) {
+            throw $this->invalid('Session JWT claims are not a JSON object.');
+        }
+        if (!is_string($claims['iss'] ?? null) || $claims['iss'] === '') {
             throw $this->invalid('Session JWT has no iss.');
         }
 
-        return $iss;
+        return $claims;
+    }
+
+    /**
+     * Refuse a Session JWT whose typ is not poppy-session+jwt.
+     *
+     * @param array<string,mixed> $header
+     * @return void
+     * @throws SessionException
+     */
+    private function checkTyp(array $header): void
+    {
+        if (($header['typ'] ?? null) !== self::SESSION_TYP) {
+            throw $this->invalid('Session JWT typ is not poppy-session+jwt.');
+        }
+    }
+
+    /**
+     * Refuse a missing or unserved Poppy-Version (spec 3.4).
+     *
+     * @param HttpRequest $request
+     * @return void
+     * @throws SessionException
+     */
+    private function checkVersion(HttpRequest $request): void
+    {
+        $version = $request->getHeader(self::HEADER_VERSION);
+        if (!is_string($version) || !preg_match(self::VERSION_PATTERN, $version)) {
+            throw new SessionException(SessionException::VERSION_UNSUPPORTED, 'Poppy-Version missing or not served.');
+        }
     }
 
     /**
@@ -212,33 +301,49 @@ class SessionVerifier
     /**
      * Verify the delegation (spec 5.2 Delegated keys, steps 1 and 2) and return its cnf.jwk.
      *
-     * @param mixed $delegation The poppy_dlg header value
-     * @param ClientMetadata $metadata
+     * An unknown kid makes the resolver fetch the key set once more, since the agent may have rotated
+     * its keys after they were cached.
+     *
+     * @param string $delegation The poppy_dlg header value
+     * @param string $clientId
      * @param int $now
      * @return array<string,mixed>
      * @throws SessionException
-     * @throws JoseException
+     * @throws ClientMetadataException
+     * @throws RateLimitException
      */
-    private function verifyDelegation(mixed $delegation, ClientMetadata $metadata, int $now): array
+    private function verifyDelegation(string $delegation, string $clientId, int $now): array
     {
-        if (!is_string($delegation) || $delegation === '') {
-            throw $this->invalid('Session JWT carries no delegation.');
+        try {
+            $kid = $this->jwsVerifier->readHeader($delegation)['kid'] ?? null;
+        } catch (JoseException $e) {
+            throw $this->invalid('Delegation malformed.', $e);
         }
-        $kid = $this->jwsVerifier->readHeader($delegation)['kid'] ?? null;
-        if (!is_string($kid) || !isset($metadata->keysByKid[$kid])) {
+        if (!is_string($kid) || $kid === '') {
+            throw $this->invalid('Delegation kid names no key in jwks_uri.');
+        }
+        $metadata = $this->metadataResolver->resolve($clientId);
+        if (!isset($metadata->keysByKid[$kid])) {
+            $metadata = $this->metadataResolver->resolve($clientId, true);
+        }
+        if (!isset($metadata->keysByKid[$kid])) {
             throw $this->invalid('Delegation kid names no key in jwks_uri.');
         }
 
-        [$header, $claims] = $this->jwsVerifier->verify(
-            $delegation,
-            $metadata->keysByKid[$kid],
-            self::DELEGATION_ALGS
-        );
+        try {
+            [$header, $claims] = $this->jwsVerifier->verify(
+                $delegation,
+                $metadata->keysByKid[$kid],
+                self::DELEGATION_ALGS
+            );
+        } catch (JoseException $e) {
+            throw $this->invalid('Delegation signature refused.', $e);
+        }
 
         if (($header['typ'] ?? null) !== self::DELEGATION_TYP) {
             throw $this->invalid('Delegation typ is not poppy-delegation+jwt.');
         }
-        if (($claims['iss'] ?? null) !== $metadata->clientId) {
+        if (($claims['iss'] ?? null) !== $clientId) {
             throw $this->invalid('Delegation iss is not the Session JWT iss.');
         }
         $iat = $claims['iat'] ?? null;

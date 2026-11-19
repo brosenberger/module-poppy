@@ -4,6 +4,7 @@
     <table name="brocode_poppy_session" resource="default" engine="innodb" comment="Poppy Sessions">
         <column xsi:type="int" name="entity_id" unsigned="true" nullable="false" identity="true" comment="Entity ID"/>
         <column xsi:type="varchar" name="session_hash" nullable="false" length="64" comment="sha256(client_id LF sid)"/>
+        <column xsi:type="varchar" name="client_hash" nullable="false" length="64" default="" comment="sha256(client_id)"/>
         <column xsi:type="varchar" name="client_id" nullable="false" length="2048" comment="Personal Agent client_id"/>
         <column xsi:type="varchar" name="sid" nullable="false" length="256" comment="Session ID"/>
         <column xsi:type="varchar" name="user_id" nullable="false" length="255" comment="User ID"/>
@@ -11,6 +12,7 @@
         <column xsi:type="timestamp" name="created_at" nullable="false" default="CURRENT_TIMESTAMP" comment="Created At"/>
         <column xsi:type="timestamp" name="last_seen_at" nullable="false" comment="Last Seen At"/>
         <column xsi:type="timestamp" name="ended_at" nullable="true" comment="Ended At"/>
+        <column xsi:type="int" name="seen_count" unsigned="true" nullable="false" default="1" comment="Requests seen"/>
         <constraint xsi:type="primary" referenceId="PRIMARY">
             <column name="entity_id"/>
         </constraint>
@@ -22,6 +24,14 @@
         </index>
         <index referenceId="BROCODE_POPPY_SESSION_ENDED_AT" indexType="btree">
             <column name="ended_at"/>
+        </index>
+        <index referenceId="BROCODE_POPPY_SESSION_CLIENT_HASH_CREATED_AT" indexType="btree">
+            <column name="client_hash"/>
+            <column name="created_at"/>
+        </index>
+        <index referenceId="BROCODE_POPPY_SESSION_SEEN_COUNT_CREATED_AT" indexType="btree">
+            <column name="seen_count"/>
+            <column name="created_at"/>
         </index>
     </table>
 </schema>

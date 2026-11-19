@@ -8,6 +8,8 @@
             </general>
             <session>
                 <enabled>0</enabled>
+                <max_fetches_per_minute>30</max_fetches_per_minute>
+                <max_new_sessions_per_hour>1000</max_new_sessions_per_hour>
             </session>
             <extensions>
                 <ucp>0</ucp>

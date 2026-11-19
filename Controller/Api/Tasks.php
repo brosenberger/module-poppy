@@ -30,6 +30,7 @@ declare(strict_types=1);
 
 namespace BroCode\Poppy\Controller\Api;
 
+use BroCode\Poppy\Exception\RateLimitException;
 use BroCode\Poppy\Exception\SessionException;
 use BroCode\Poppy\Model\Session\SessionRepository;
 use BroCode\Poppy\Model\Session\SessionVerifier;
@@ -39,15 +40,19 @@ use Magento\Framework\App\Request\Http as HttpRequest;
 use Magento\Framework\Controller\Result\Json;
 use Magento\Framework\Controller\Result\JsonFactory;
 use Magento\Store\Model\ScopeInterface;
+use Psr\Log\LoggerInterface;
 
 /**
  * GET {tasks.endpoint} (spec 9): the tasks this Company doesn't offer through the protocol, per Session.
  *
  * The first Poppy resource that uses Session identity, so it verifies the Session header (5.3) and keeps
  * the Session record. This Company issues no access tokens, so any Bearer token is refused as invalid.
+ * Served only while both poppy.json and Sessions are switched on. Any unexpected error is answered as
+ * invalid_session, never as a 500 with an error report.
  */
 class Tasks implements HttpGetActionInterface
 {
+    private const XML_PATH_ENABLED = 'brocode_poppy/general/enabled';
     private const XML_PATH_SESSION_ENABLED = 'brocode_poppy/session/enabled';
 
     /**
@@ -56,13 +61,15 @@ class Tasks implements HttpGetActionInterface
      * @param ScopeConfigInterface $scopeConfig
      * @param SessionVerifier $sessionVerifier
      * @param SessionRepository $sessionRepository
+     * @param LoggerInterface $logger
      */
     public function __construct(
         private readonly HttpRequest $request,
         private readonly JsonFactory $jsonFactory,
         private readonly ScopeConfigInterface $scopeConfig,
         private readonly SessionVerifier $sessionVerifier,
-        private readonly SessionRepository $sessionRepository
+        private readonly SessionRepository $sessionRepository,
+        private readonly LoggerInterface $logger
     ) {
     }
 
@@ -75,7 +82,9 @@ class Tasks implements HttpGetActionInterface
     {
         $result = $this->jsonFactory->create()->setHeader('Cache-Control', 'private, no-store', true);
 
-        if (!$this->scopeConfig->isSetFlag(self::XML_PATH_SESSION_ENABLED, ScopeInterface::SCOPE_STORE)) {
+        if (!$this->scopeConfig->isSetFlag(self::XML_PATH_ENABLED, ScopeInterface::SCOPE_STORE)
+            || !$this->scopeConfig->isSetFlag(self::XML_PATH_SESSION_ENABLED, ScopeInterface::SCOPE_STORE)
+        ) {
             return $result->setHttpResponseCode(404)->setData(['error' => 'not_found']);
         }
 
@@ -86,9 +95,30 @@ class Tasks implements HttpGetActionInterface
         }
 
         try {
-            $this->sessionRepository->touch($this->sessionVerifier->verify($this->request));
+            $session = $this->sessionVerifier->verify($this->request);
+            try {
+                $this->sessionRepository->touch($session);
+            } catch (SessionException $e) {
+                $this->logger->debug('Poppy Session refused.', [
+                    'client_id' => $session->clientId,
+                    'error' => $e->getErrorCode(),
+                ]);
+                throw $e;
+            }
         } catch (SessionException $e) {
             return $result->setHttpResponseCode(400)->setData(['error' => $e->getErrorCode()]);
+        } catch (RateLimitException $e) {
+            // Spec 5.6: 429 with Retry-After, no custom body.
+            return $result->setHttpResponseCode(429)
+                ->setHeader('Retry-After', (string)$e->getRetryAfter(), true)
+                ->setData([]);
+        } catch (\Throwable $e) {
+            // Last resort: the class only, never the message, which may echo request data.
+            $this->logger->warning('Poppy Session verification failed unexpectedly.', [
+                'exception' => get_class($e),
+            ]);
+
+            return $result->setHttpResponseCode(400)->setData(['error' => SessionException::INVALID_SESSION]);
         }
 
         return $result->setData(['excluded_tasks' => []]);

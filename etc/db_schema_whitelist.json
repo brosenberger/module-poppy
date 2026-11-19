@@ -9,11 +9,15 @@
             "agent_id": true,
             "created_at": true,
             "last_seen_at": true,
-            "ended_at": true
+            "ended_at": true,
+            "client_hash": true,
+            "seen_count": true
         },
         "index": {
             "BROCODE_POPPY_SESSION_LAST_SEEN_AT": true,
-            "BROCODE_POPPY_SESSION_ENDED_AT": true
+            "BROCODE_POPPY_SESSION_ENDED_AT": true,
+            "BROCODE_POPPY_SESSION_CLIENT_HASH_CREATED_AT": true,
+            "BROCODE_POPPY_SESSION_SEEN_COUNT_CREATED_AT": true
         },
         "constraint": {
             "PRIMARY": true,

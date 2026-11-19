@@ -57,6 +57,11 @@ class SafeFetcherTest extends TestCase
     private array $sentHeaders = [];
 
     /**
+     * @var string[] Hosts the resolver was asked for
+     */
+    private array $resolvedHosts = [];
+
+    /**
      * Build the subject with a mocked resolver, Curl client and deployment config.
      *
      * @param string[] $addresses What the host resolves to
@@ -64,6 +69,8 @@ class SafeFetcherTest extends TestCase
      * @param int $status Response status
      * @param string $body Response body
      * @param array<string,string> $headers Response headers
+     * @param \Throwable|null $resolverError Thrown by the resolver instead of answering
+     * @param \Throwable|null $curlError Thrown by Curl::get() after recording the URL
      * @return SafeFetcher
      */
     private function fetcher(
@@ -71,11 +78,14 @@ class SafeFetcherTest extends TestCase
         bool $allowPrivate = false,
         int $status = 200,
         string $body = '{"client_id":"https://agent.example/"}',
-        array $headers = []
+        array $headers = [],
+        ?\Throwable $resolverError = null,
+        ?\Throwable $curlError = null
     ): SafeFetcher {
         $this->options = [];
         $this->requestedUrl = null;
         $this->sentHeaders = [];
+        $this->resolvedHosts = [];
 
         /** @var Curl&MockObject $curl */
         $curl = $this->createMock(Curl::class);
@@ -88,8 +98,11 @@ class SafeFetcherTest extends TestCase
         $curl->method('addHeader')->willReturnCallback(function (string $name, string $value): void {
             $this->sentHeaders[$name] = $value;
         });
-        $curl->method('get')->willReturnCallback(function (string $url): void {
+        $curl->method('get')->willReturnCallback(function (string $url) use ($curlError): void {
             $this->requestedUrl = $url;
+            if ($curlError !== null) {
+                throw $curlError;
+            }
         });
         $curl->method('getStatus')->willReturn($status);
         $curl->method('getBody')->willReturn($body);
@@ -99,7 +112,16 @@ class SafeFetcherTest extends TestCase
         $curlFactory->method('create')->willReturn($curl);
 
         $resolver = $this->createMock(HostResolver::class);
-        $resolver->method('resolve')->willReturn($addresses);
+        $resolver->method('resolve')->willReturnCallback(
+            function (string $host) use ($addresses, $resolverError): array {
+                $this->resolvedHosts[] = $host;
+                if ($resolverError !== null) {
+                    throw $resolverError;
+                }
+
+                return $addresses;
+            }
+        );
 
         $deploymentConfig = $this->createMock(DeploymentConfig::class);
         $deploymentConfig->method('get')->willReturnMap([
@@ -178,20 +200,109 @@ class SafeFetcherTest extends TestCase
 
         $this->assertSame(['client_id' => 'https://agent.example/'], $result->body);
         $this->assertSame('https://agent.example/metadata.json', $this->requestedUrl);
-        $this->assertSame(['agent.example:443:10.0.0.1'], $this->options[CURLOPT_RESOLVE]);
+        $this->assertSame(['::10.0.0.1:443'], $this->options[CURLOPT_CONNECT_TO]);
     }
 
-    public function testPinsResolvedAddress(): void
+    public function testPinsResolvedAddressWithConnectToForAnyHostCurlParses(): void
     {
+        // F1: CURLOPT_RESOLVE pins only the name we pass; CONNECT_TO with an empty host applies to
+        // whatever host curl itself parses from the URL.
         $this->fetcher(['93.184.215.14', '93.184.215.15'])->fetchJson('https://agent.example/metadata.json');
-        $this->assertSame(['agent.example:443:93.184.215.14'], $this->options[CURLOPT_RESOLVE]);
+        $this->assertSame(['::93.184.215.14:443'], $this->options[CURLOPT_CONNECT_TO]);
 
         $this->fetcher(['2606:2800:21f:cb07:6820:80da:af6b:8b2c'])
             ->fetchJson('https://agent.example:8443/metadata.json');
         $this->assertSame(
-            ['agent.example:8443:[2606:2800:21f:cb07:6820:80da:af6b:8b2c]'],
-            $this->options[CURLOPT_RESOLVE]
+            ['::[2606:2800:21f:cb07:6820:80da:af6b:8b2c]:8443'],
+            $this->options[CURLOPT_CONNECT_TO]
         );
+    }
+
+    public function testRefusesPercentEncodedAndNonLdhHostsBeforeResolving(): void
+    {
+        // F1: Laminas keeps %6c in the host, the resolver checks "%6cocalhost", curl decodes it to localhost.
+        $hosts = [
+            '%6cocalhost',
+            'd%62:3306',
+            'agent%2eexample',
+            'a_b.example',
+            '-agent.example',
+            'agent-.example',
+            'agent..example',
+            'agent.example.',
+            str_repeat('a', 64) . '.example',
+            implode('.', array_fill(0, 64, 'abc')),
+            '127.1',
+            '0x7f.1',
+        ];
+        foreach ($hosts as $host) {
+            $this->assertRefused($this->fetcher(['93.184.215.14']), 'https://' . $host . '/metadata.json');
+            $this->assertSame([], $this->resolvedHosts, 'Host must be refused before resolving: ' . $host);
+        }
+    }
+
+    public function testAcceptsLdhHostsAndIpLiterals(): void
+    {
+        $urls = [
+            'https://agent-1.Example.com/metadata.json',
+            'https://' . str_repeat('a', 63) . '.example/metadata.json',
+            'https://93.184.215.14/metadata.json',
+            'https://[2606:2800:21f:cb07:6820:80da:af6b:8b2c]/metadata.json',
+        ];
+        foreach ($urls as $url) {
+            $result = $this->fetcher(['93.184.215.14'])->fetchJson($url);
+            $this->assertSame(['client_id' => 'https://agent.example/'], $result->body);
+            $this->assertSame($url, $this->requestedUrl);
+        }
+    }
+
+    public function testRefusesControlCharactersAndSpacesInUrl(): void
+    {
+        // F2: a NUL in the URL makes curl_setopt throw ValueError, which catch (\Exception) misses.
+        foreach (["\x00", "\x01", "\x1f", ' ', "\t", "\x7f"] as $char) {
+            $this->assertRefused(
+                $this->fetcher(['93.184.215.14']),
+                'https://agent.example/meta' . $char . 'data.json'
+            );
+            $this->assertSame([], $this->resolvedHosts);
+        }
+    }
+
+    public function testResolverErrorBecomesFetchException(): void
+    {
+        // F2: dns_get_record warnings become \Exception through Magento's error handler.
+        $fetcher = $this->fetcher([], false, 200, '{}', [], new \Exception('Warning: dns_get_record(): failed'));
+
+        $this->assertRefused($fetcher, 'https://agent.example/metadata.json');
+    }
+
+    public function testCurlValueErrorBecomesFetchException(): void
+    {
+        $fetcher = $this->fetcher(['93.184.215.14'], false, 200, '{}', [], null, new \ValueError('bad option'));
+
+        $this->expectException(FetchException::class);
+        $fetcher->fetchJson('https://agent.example/metadata.json');
+    }
+
+    public function testDownloadIsAbortedPast64KbWhateverTheLibcurlVersion(): void
+    {
+        // F6: CURLOPT_MAXFILESIZE is ignored for chunked responses on older libcurl.
+        $this->fetcher(['93.184.215.14'])->fetchJson('https://agent.example/metadata.json');
+
+        $this->assertFalse($this->options[CURLOPT_NOPROGRESS] ?? true);
+        $progress = $this->options[CURLOPT_PROGRESSFUNCTION] ?? null;
+        $this->assertIsCallable($progress);
+        $handle = curl_init();
+        $this->assertSame(0, $progress($handle, 0, 65536, 0, 0));
+        $this->assertNotSame(0, $progress($handle, 0, 65537, 0, 0));
+        $this->assertNotSame(0, $progress($handle, 0, 10000000, 0, 0));
+    }
+
+    public function testRejectsNat64LocalUsePrefix(): void
+    {
+        // F7: 64:ff9b:1::/48 (RFC 8215) passes FILTER_FLAG_GLOBAL_RANGE.
+        $this->assertRefused($this->fetcher(['64:ff9b:1::a00:1']), 'https://agent.example/metadata.json');
+        $this->assertRefused($this->fetcher(['64:ff9b:1:ffff::7f00:1']), 'https://agent.example/metadata.json');
     }
 
     public function testDoesNotFollowRedirects(): void
