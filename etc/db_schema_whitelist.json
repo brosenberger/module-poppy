@@ -23,5 +23,25 @@
             "PRIMARY": true,
             "BROCODE_POPPY_SESSION_SESSION_HASH": true
         }
+    },
+    "brocode_poppy_feedback": {
+        "column": {
+            "entity_id": true,
+            "store_id": true,
+            "client_id": true,
+            "client_hash": true,
+            "task": true,
+            "description": true,
+            "created_at": true
+        },
+        "index": {
+            "BROCODE_POPPY_FEEDBACK_CLIENT_HASH_CREATED_AT": true,
+            "BROCODE_POPPY_FEEDBACK_CREATED_AT": true,
+            "BROCODE_POPPY_FEEDBACK_STORE_ID_CREATED_AT": true
+        },
+        "constraint": {
+            "PRIMARY": true,
+            "BROCODE_POPPY_FEEDBACK_STORE_ID_STORE_STORE_ID": true
+        }
     }
 }

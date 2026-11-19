@@ -5,5 +5,8 @@
         <job name="brocode_poppy_cleanup_sessions" instance="BroCode\Poppy\Cron\CleanupSessions" method="execute">
             <schedule>17 3 * * *</schedule>
         </job>
+        <job name="brocode_poppy_cleanup_feedback" instance="BroCode\Poppy\Cron\CleanupFeedback" method="execute">
+            <schedule>27 3 * * *</schedule>
+        </job>
     </group>
 </config>

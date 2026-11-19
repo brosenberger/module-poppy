@@ -4,6 +4,9 @@
     <acl>
         <resources>
             <resource id="Magento_Backend::admin">
+                <resource id="Magento_Reports::report">
+                    <resource id="BroCode_Poppy::feedback" title="Poppy Agent Feedback" translate="title" sortOrder="90"/>
+                </resource>
                 <resource id="Magento_Backend::stores">
                     <resource id="Magento_Backend::stores_settings">
                         <resource id="Magento_Config::config">

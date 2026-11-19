@@ -30,6 +30,7 @@ declare(strict_types=1);
 
 namespace BroCode\Poppy\Controller;
 
+use BroCode\Poppy\Controller\Api\Feedback;
 use BroCode\Poppy\Controller\Api\Tasks;
 use BroCode\Poppy\Controller\WellKnown\Poppy;
 use Magento\Framework\App\ActionFactory;
@@ -45,6 +46,7 @@ class Router implements RouterInterface
 {
     public const PATH = '/.well-known/poppy.json';
     public const TASKS_PATH = '/poppy/v1/tasks';
+    public const FEEDBACK_PATH = '/poppy/v1/feedback';
 
     /**
      * @param ActionFactory $actionFactory
@@ -62,13 +64,17 @@ class Router implements RouterInterface
      */
     public function match(RequestInterface $request): ?ActionInterface
     {
-        if (!$request instanceof HttpRequest) {
+        // FrontController::dispatch() answers a NotFoundException (e.g. a wrong HTTP method) with initForward()
+        // and action 'noroute', and DefaultRouter forwards on to the CMS 404 page; each step matches again with the
+        // same path. initForward() records the original route, so a request with forward info is never ours.
+        if (!$request instanceof HttpRequest || !empty($request->getBeforeForwardInfo())) {
             return null;
         }
 
         return match ($request->getPathInfo()) {
             self::PATH => $this->dispatch($request, 'wellknown', 'poppy', Poppy::class),
             self::TASKS_PATH => $this->dispatch($request, 'api', 'tasks', Tasks::class),
+            self::FEEDBACK_PATH => $this->dispatch($request, 'api', 'feedback', Feedback::class),
             default => null,
         };
     }

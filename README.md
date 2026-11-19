@@ -2,7 +2,9 @@
 
 Personal Agent Protocol (Poppy) 1.0 for Magento 2. Publishes `/.well-known/poppy.json` per
 store, links an existing UCP profile, and verifies the signed `Poppy-Session` header that
-personal agents (Meta's Muse and others) send, on a `GET /poppy/v1/tasks` endpoint.
+personal agents (Meta's Muse and others) send, on a `GET /poppy/v1/tasks` endpoint. Agents
+can report tasks they couldn't do in the shop (`POST /poppy/v1/feedback`); the reports show up
+in an admin grid.
 
 It covers the signed-out part of Poppy: no OAuth issuer, no sign-in, no access tokens. It
 implements no UCP itself. Pair it with a module that serves `/.well-known/ucp` (tested with
@@ -18,8 +20,9 @@ ddev exec php bin/magento module:enable BroCode_Poppy
 ddev exec php bin/magento setup:upgrade
 ```
 
-Requires PHP 8.2+ and Magento 2.4 with `Magento_JwtFrameworkAdapter` (ships with core).
-`setup:upgrade` creates the table `brocode_poppy_session`.
+Requires PHP 8.2+ and Magento 2.4 with `Magento_JwtFrameworkAdapter` and `Magento_Reports` (both
+ship with core; the feedback grid sits under *Reports*).
+`setup:upgrade` creates the tables `brocode_poppy_session` and `brocode_poppy_feedback`.
 
 ## What it does
 
@@ -71,6 +74,28 @@ the module never issues tokens. Headers and JWTs are never logged; failures log 
 A daily cron (`03:17`) deletes Sessions idle for 30 days, Sessions seen only once after 24 h, and
 ended Sessions after 30 days.
 
+### Feedback: `POST /poppy/v1/feedback`
+
+Spec 9.3: a Personal Agent reports a User's task it couldn't do through the protocol. Listed in the
+tasks response as `"feedback": {"endpoint": "…/poppy/v1/feedback"}` only while feedback is on.
+
+```json
+{ "task": "Pay with a gift card", "description": "The checkout offers no field for a gift card code." }
+```
+
+- Same Session checks as the tasks endpoint; a report without a valid `Poppy-Session` gets 400
+  `invalid_session`, so every stored report has a verified agent.
+- `task` 1–200 and `description` 1–2000 characters, both required; body at most 16 KB. Anything else
+  gets 400 `{"error": "invalid_request"}`. Accepted reports get 202 with no body.
+- At most 50 reports per agent and 500 per store view per hour (both configurable); above either, 429
+  with `Retry-After` set to when the oldest report in that window turns an hour old. Counting and
+  storing are not atomic, so parallel requests can pass a cap by a few reports.
+- Stored in `brocode_poppy_feedback` with store, agent `client_id`, task, description and date. The
+  User ID and Session ID are not stored. The report text is never logged.
+- Admin: *Reports → Poppy → Agent Feedback* (ACL `BroCode_Poppy::feedback`), with mass delete. The
+  text is shown escaped: it is untrusted input written by an agent.
+- A daily cron (`03:27`) deletes reports older than 90 days (configurable).
+
 ## Configure
 
 Stores → Configuration → General → Personal Agent Protocol (Poppy):
@@ -85,6 +110,10 @@ Stores → Configuration → General → Personal Agent Protocol (Poppy):
 | `brocode_poppy/session/allowed_client_ids` | empty | One per line; empty = every verified agent |
 | `brocode_poppy/session/max_fetches_per_minute` | 30 | Cap on agent metadata fetches per store |
 | `brocode_poppy/session/max_new_sessions_per_hour` | 1000 | Cap on new Sessions per agent |
+| `brocode_poppy/feedback/enabled` | 0 | Accept feedback reports (needs Sessions on) |
+| `brocode_poppy/feedback/max_reports_per_hour` | 50 | Reports per agent per hour |
+| `brocode_poppy/feedback/max_reports_total_per_hour` | 500 | Reports per store view per hour, all agents |
+| `brocode_poppy/feedback/retention_days` | 90 | Days a report is kept |
 | `brocode_poppy/extensions/ucp` | 0 | Advertise the UCP profile (see above) |
 
 Local testing only: agents hosted on private addresses (DDEV, the kit validator's test agent)
@@ -109,14 +138,16 @@ node <kit>/validate/index.ts check https://<host> \
   --probe https://<host>/poppy/v1/tasks --probe-session
 ```
 
-Result on Magento 2.4.8-p5 / PHP 8.4: exit 0, Foundation 38 passed / 0 failed, Interfaces 2 / 0,
-all 24 `session.*` checks pass. Sign-in checks are skipped (no issuer by design).
+Result for 1.0.0 on Magento 2.4.8-p5 / PHP 8.4: exit 0, Foundation 38 passed / 0 failed, Interfaces 2 / 0,
+all 24 `session.*` checks pass. Sign-in checks are skipped (no issuer by design). The feedback
+endpoint added in 1.1.0 is covered by unit tests; it has not had a validator run yet.
 
 ## Limits
 
 - No sign-in, OAuth issuer, access tokens, conversations or browser handoff.
 - Storefront pages do not verify `Poppy-Session`; they stay fully cached.
-- No replay cache: the only Session resource is an idempotent GET.
+- No replay cache: a feedback request replayed inside the Session JWT's acceptance window (about
+  90 s) stores a duplicate report; the hourly cap bounds it.
 - Sessions are shared across store views on the same domain.
 
 ## License

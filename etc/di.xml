@@ -12,4 +12,19 @@
             </argument>
         </arguments>
     </type>
+    <!-- Admin grid Reports > Poppy > Agent Feedback -->
+    <type name="Magento\Framework\View\Element\UiComponent\DataProvider\CollectionFactory">
+        <arguments>
+            <argument name="collections" xsi:type="array">
+                <item name="brocode_poppy_feedback_listing_data_source" xsi:type="string">BroCode\Poppy\Model\ResourceModel\Feedback\Grid\Collection</item>
+            </argument>
+        </arguments>
+    </type>
+    <virtualType name="BroCode\Poppy\Model\ResourceModel\Feedback\Grid\Collection"
+                 type="Magento\Framework\View\Element\UiComponent\DataProvider\SearchResult">
+        <arguments>
+            <argument name="mainTable" xsi:type="string">brocode_poppy_feedback</argument>
+            <argument name="resourceModel" xsi:type="string">BroCode\Poppy\Model\ResourceModel\Feedback</argument>
+        </arguments>
+    </virtualType>
 </config>

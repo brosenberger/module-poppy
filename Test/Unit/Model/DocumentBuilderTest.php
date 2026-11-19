@@ -43,6 +43,22 @@ use PHPUnit\Framework\TestCase;
 class DocumentBuilderTest extends TestCase
 {
     /**
+     * The document the builder returns where the test expects one (fails the test on null).
+     *
+     * @param DocumentBuilder $builder
+     * @return array<string, mixed>
+     */
+    private static function built(DocumentBuilder $builder): array
+    {
+        $document = $builder->build();
+        if ($document === null) {
+            self::fail('No document was built.');
+        }
+
+        return $document;
+    }
+
+    /**
      * Build the subject with stubbed store config, base URL and enabled modules.
      *
      * @param array<string, string|null> $config
@@ -96,7 +112,7 @@ class DocumentBuilderTest extends TestCase
 
     public function testWebsiteOnlyDocumentHasNoAuthAndLowercaseDomain(): void
     {
-        $doc = $this->builder(['brocode_poppy/general/enabled' => '1'])->build();
+        $doc = self::built($this->builder(['brocode_poppy/general/enabled' => '1']));
 
         // `web` is an empty JSON object: the website is browsable, with no browser-session endpoint.
         self::assertEquals([
@@ -110,22 +126,22 @@ class DocumentBuilderTest extends TestCase
 
     public function testNonDefaultPortIsPartOfTheDomain(): void
     {
-        $doc = $this->builder(['brocode_poppy/general/enabled' => '1'], 'https://shop.test:8443/')->build();
+        $doc = self::built($this->builder(['brocode_poppy/general/enabled' => '1'], 'https://shop.test:8443/'));
 
         self::assertSame('shop.test:8443', $doc['organization']['domain']);
     }
 
     public function testOrganizationNameFallsBackToStoreInformationThenFrontendName(): void
     {
-        $fromOverride = $this->builder([
+        $fromOverride = self::built($this->builder([
             'brocode_poppy/general/enabled' => '1',
             'brocode_poppy/general/organization_name' => 'ACME GmbH',
             'general/store_information/name' => 'ACME Store',
-        ])->build();
-        $fromStoreInfo = $this->builder([
+        ]));
+        $fromStoreInfo = self::built($this->builder([
             'brocode_poppy/general/enabled' => '1',
             'general/store_information/name' => 'ACME Store',
-        ])->build();
+        ]));
 
         self::assertSame('ACME GmbH', $fromOverride['organization']['name']);
         self::assertSame('ACME Store', $fromStoreInfo['organization']['name']);
@@ -133,14 +149,14 @@ class DocumentBuilderTest extends TestCase
 
     public function testLogoOnlyWhenHttps(): void
     {
-        $https = $this->builder([
+        $https = self::built($this->builder([
             'brocode_poppy/general/enabled' => '1',
             'brocode_poppy/general/logo_uri' => 'https://cdn.example.com/logo.svg',
-        ])->build();
-        $http = $this->builder([
+        ]));
+        $http = self::built($this->builder([
             'brocode_poppy/general/enabled' => '1',
             'brocode_poppy/general/logo_uri' => 'http://cdn.example.com/logo.svg',
-        ])->build();
+        ]));
 
         self::assertSame('https://cdn.example.com/logo.svg', $https['organization']['logo_uri']);
         self::assertArrayNotHasKey('logo_uri', $http['organization']);
@@ -148,54 +164,54 @@ class DocumentBuilderTest extends TestCase
 
     public function testUcpExtensionListedWhenToggleOnAndProfileModuleServesIt(): void
     {
-        $doc = $this->builder([
+        $doc = self::built($this->builder([
             'brocode_poppy/general/enabled' => '1',
             'brocode_poppy/extensions/ucp' => '1',
             'angeo_ucp/general/enabled' => '1',
-        ], enabledModules: ['Angeo_Ucp'])->build();
+        ], enabledModules: ['Angeo_Ucp']));
 
         self::assertSame(['ucp' => [['version' => '1']]], $doc['extensions']);
     }
 
     public function testUcpExtensionNotListedWhenProfileModuleIsSwitchedOff(): void
     {
-        $doc = $this->builder([
+        $doc = self::built($this->builder([
             'brocode_poppy/general/enabled' => '1',
             'brocode_poppy/extensions/ucp' => '1',
             'angeo_ucp/general/enabled' => '0',
-        ], enabledModules: ['Angeo_Ucp'])->build();
+        ], enabledModules: ['Angeo_Ucp']));
 
         self::assertArrayNotHasKey('extensions', $doc);
     }
 
     public function testUcpExtensionNotListedWithoutAnyProfileModule(): void
     {
-        $doc = $this->builder([
+        $doc = self::built($this->builder([
             'brocode_poppy/general/enabled' => '1',
             'brocode_poppy/extensions/ucp' => '1',
             'angeo_ucp/general/enabled' => '1',
-        ])->build();
+        ]));
 
         self::assertArrayNotHasKey('extensions', $doc);
     }
 
     public function testUcpExtensionNotListedWhenToggleOff(): void
     {
-        $doc = $this->builder([
+        $doc = self::built($this->builder([
             'brocode_poppy/general/enabled' => '1',
             'angeo_ucp/general/enabled' => '1',
-        ], enabledModules: ['Angeo_Ucp'])->build();
+        ], enabledModules: ['Angeo_Ucp']));
 
         self::assertArrayNotHasKey('extensions', $doc);
     }
 
     public function testTasksEndpointListedOnlyWhenSessionsEnabled(): void
     {
-        $on = $this->builder([
+        $on = self::built($this->builder([
             'brocode_poppy/general/enabled' => '1',
             'brocode_poppy/session/enabled' => '1',
-        ], 'https://shop.example.com/')->build();
-        $off = $this->builder(['brocode_poppy/general/enabled' => '1'], 'https://shop.example.com/')->build();
+        ], 'https://shop.example.com/'));
+        $off = self::built($this->builder(['brocode_poppy/general/enabled' => '1'], 'https://shop.example.com/'));
 
         // Link base URL (store code in URL here), so the path matches what the router and htu see.
         self::assertSame(['endpoint' => 'https://shop.example.com/de/poppy/v1/tasks'], $on['tasks']);

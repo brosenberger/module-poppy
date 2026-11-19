@@ -33,6 +33,7 @@ namespace BroCode\Poppy\Test\Unit\Controller\Api;
 use BroCode\Poppy\Controller\Api\Tasks;
 use BroCode\Poppy\Exception\RateLimitException;
 use BroCode\Poppy\Exception\SessionException;
+use BroCode\Poppy\Model\Session\RequestGate;
 use BroCode\Poppy\Model\Session\SessionRepository;
 use BroCode\Poppy\Model\Session\SessionVerifier;
 use BroCode\Poppy\Model\Session\VerifiedSession;
@@ -40,6 +41,9 @@ use Magento\Framework\App\Config\ScopeConfigInterface;
 use Magento\Framework\App\Request\Http as HttpRequest;
 use Magento\Framework\Controller\Result\Json;
 use Magento\Framework\Controller\Result\JsonFactory;
+use Magento\Framework\UrlInterface;
+use Magento\Store\Model\Store;
+use Magento\Store\Model\StoreManagerInterface;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 
@@ -119,13 +123,21 @@ class TasksTest extends TestCase
             $repository->method('touch')->willThrowException($repositoryError);
         }
 
+        $store = $this->createMock(Store::class);
+        $store->method('getBaseUrl')->willReturnCallback(
+            static fn (string $type, ?bool $secure = null) => $type === UrlInterface::URL_TYPE_LINK && $secure === true
+                ? 'https://shop.example/de/'
+                : 'http://wrong.example/'
+        );
+        $storeManager = $this->createMock(StoreManagerInterface::class);
+        $storeManager->method('getStore')->willReturn($store);
+
         return new Tasks(
             $request,
             $jsonFactory,
             $scopeConfig,
-            $verifier,
-            $repository,
-            $this->createMock(LoggerInterface::class)
+            new RequestGate($scopeConfig, $verifier, $repository, $this->createMock(LoggerInterface::class)),
+            $storeManager
         );
     }
 
@@ -179,5 +191,19 @@ class TasksTest extends TestCase
 
         $this->assertSame(429, $this->status);
         $this->assertSame('17', $this->headers['Retry-After'] ?? null);
+    }
+
+    public function testListsFeedbackEndpointOnlyWhenEnabled(): void
+    {
+        $this->controller(null, null, ['brocode_poppy/feedback/enabled' => true])->execute();
+
+        $this->assertSame(
+            ['excluded_tasks' => [], 'feedback' => ['endpoint' => 'https://shop.example/de/poppy/v1/feedback']],
+            $this->data
+        );
+
+        $this->controller(null, null, ['brocode_poppy/feedback/enabled' => false])->execute();
+
+        $this->assertSame(['excluded_tasks' => []], $this->data);
     }
 }

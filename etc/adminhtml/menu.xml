@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="urn:magento:module:Magento_Backend:etc/menu.xsd">
+    <menu>
+        <add id="BroCode_Poppy::reports" title="Poppy" translate="title" module="BroCode_Poppy" sortOrder="90"
+             parent="Magento_Reports::report" resource="BroCode_Poppy::feedback"/>
+        <add id="BroCode_Poppy::feedback" title="Agent Feedback" translate="title" module="BroCode_Poppy" sortOrder="10"
+             parent="BroCode_Poppy::reports" action="brocode_poppy/feedback/index" resource="BroCode_Poppy::feedback"/>
+    </menu>
+</config>

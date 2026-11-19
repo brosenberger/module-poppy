@@ -52,6 +52,29 @@
                     <depends><field id="enabled">1</field></depends>
                 </field>
             </group>
+            <group id="feedback" translate="label" sortOrder="17" showInDefault="1" showInWebsite="1" showInStore="1">
+                <label>Agent Feedback</label>
+                <field id="enabled" translate="label comment" type="select" sortOrder="10" showInDefault="1" showInWebsite="1" showInStore="1">
+                    <label>Accept Feedback Reports</label>
+                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
+                    <comment>Needs Personal Agent Sessions. Lists /poppy/v1/feedback in the tasks response; reports appear under Reports > Poppy > Agent Feedback.</comment>
+                </field>
+                <field id="max_reports_per_hour" translate="label comment" type="text" sortOrder="20" showInDefault="1">
+                    <label>Reports per Agent per Hour</label>
+                    <comment>Per client_id. Beyond it, reports get HTTP 429 with Retry-After.</comment>
+                    <validate>required-entry validate-digits validate-greater-than-zero</validate>
+                </field>
+                <field id="max_reports_total_per_hour" translate="label comment" type="text" sortOrder="25" showInDefault="1">
+                    <label>Reports per Store View per Hour</label>
+                    <comment>All agents together. Beyond it, reports get HTTP 429 with Retry-After.</comment>
+                    <validate>required-entry validate-digits validate-greater-than-zero</validate>
+                </field>
+                <field id="retention_days" translate="label comment" type="text" sortOrder="30" showInDefault="1">
+                    <label>Keep Reports for (Days)</label>
+                    <comment>Older reports are deleted daily. Reports may contain personal data.</comment>
+                    <validate>required-entry validate-digits validate-greater-than-zero</validate>
+                </field>
+            </group>
             <group id="extensions" translate="label" sortOrder="20" showInDefault="1" showInWebsite="1" showInStore="1">
                 <label>Extensions</label>
                 <field id="ucp" translate="label comment" type="select" sortOrder="10" showInDefault="1" showInWebsite="1" showInStore="1">

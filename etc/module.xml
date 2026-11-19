@@ -4,6 +4,9 @@
     <module name="BroCode_Poppy">
         <sequence>
             <module name="Magento_Store"/>
+            <module name="Magento_Backend"/>
+            <module name="Magento_Ui"/>
+            <module name="Magento_Reports"/>
             <module name="Magento_JwtFrameworkAdapter"/>
         </sequence>
     </module>
