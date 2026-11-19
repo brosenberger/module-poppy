@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="urn:magento:module:Magento_Config:etc/system_file.xsd">
+    <system>
+        <section id="brocode_poppy" translate="label" sortOrder="900" showInDefault="1" showInWebsite="1" showInStore="1">
+            <label>Personal Agent Protocol (Poppy)</label>
+            <tab>general</tab>
+            <resource>BroCode_Poppy::config</resource>
+            <group id="general" translate="label" sortOrder="10" showInDefault="1" showInWebsite="1" showInStore="1">
+                <label>Discovery</label>
+                <field id="enabled" translate="label comment" type="select" sortOrder="10" showInDefault="1" showInWebsite="1" showInStore="1">
+                    <label>Publish /.well-known/poppy.json</label>
+                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
+                    <comment>Needs a secure (https) base URL. organization.domain is taken from it.</comment>
+                </field>
+                <field id="organization_name" translate="label comment" type="text" sortOrder="20" showInDefault="1" showInWebsite="1" showInStore="1">
+                    <label>Organization Name</label>
+                    <comment>Empty: Store Information name, then the store's frontend name.</comment>
+                </field>
+                <field id="logo_uri" translate="label comment" type="text" sortOrder="30" showInDefault="1" showInWebsite="1" showInStore="1">
+                    <label>Logo URL</label>
+                    <comment>https only; anything else is left out.</comment>
+                </field>
+            </group>
+            <group id="extensions" translate="label" sortOrder="20" showInDefault="1" showInWebsite="1" showInStore="1">
+                <label>Extensions</label>
+                <field id="ucp" translate="label comment" type="select" sortOrder="10" showInDefault="1" showInWebsite="1" showInStore="1">
+                    <label>Advertise UCP</label>
+                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
+                    <comment>Listed only while a known UCP module (Angeo_Ucp by default) is enabled and switched on for this store.</comment>
+                </field>
+            </group>
+        </section>
+    </system>
+</config>

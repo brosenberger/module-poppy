@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="urn:magento:framework:ObjectManager/etc/config.xsd">
+    <!--
+        UCP modules that serve /.well-known/ucp: module name => config flag that switches the profile on.
+        Another UCP module adds its own item here from its di.xml.
+    -->
+    <type name="BroCode\Poppy\Model\DocumentBuilder">
+        <arguments>
+            <argument name="ucpProfileProviders" xsi:type="array">
+                <item name="Angeo_Ucp" xsi:type="string">angeo_ucp/general/enabled</item>
+            </argument>
+        </arguments>
+    </type>
+</config>

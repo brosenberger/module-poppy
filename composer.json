@@ -1,0 +1,18 @@
+{
+  "name": "brocode/module-poppy",
+  "version": "0.1.0",
+  "license": ["MIT"],
+  "authors": [{"name": "Benjamin Rosenberger", "email": "bensch.rosenberger@gmail.com"}],
+  "description": "Personal Agent Protocol (Poppy) discovery for Magento 2: publishes /.well-known/poppy.json and links an existing UCP profile",
+  "homepage": "https://brocode.at",
+  "type": "magento2-module",
+  "require": {
+    "php": ">=8.1",
+    "magento/framework": "*",
+    "magento/module-store": "*"
+  },
+  "autoload": {
+    "files": ["registration.php"],
+    "psr-4": {"BroCode\\Poppy\\": ""}
+  }
+}
