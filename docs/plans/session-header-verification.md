@@ -150,6 +150,20 @@ requires.
 - `ddev exec vendor/bin/phpstan analyse -l 8 app/code/BroCode/Poppy` → no errors.
 - `curl -sk -o /dev/null -w '%{http_code}' https://magento2-sandbox.ddev.site/poppy/v1/tasks` → 400.
 
+### 10. Review fixes (review 2026-11-19, verdict "ship after fixes")
+Findings and decisions (user, 2026-11-19):
+- F1 percent-encoded host bypasses the address check and pin → accept only LDH hostnames (labels 1–63, total ≤ 253) or IP literals; pin with `CURLOPT_CONNECT_TO` (applies to whatever host curl parses); refuse control chars and `%` in the host.
+- F2 unsigned header → 500 → catch `\Throwable` around DNS and curl (wrap in `FetchException`), refuse `[\x00-\x20\x7f]` in fetched URLs, last-resort catch in `Tasks` → 400 `invalid_session`, never a `var/report`.
+- F3 outbound work before any signature (decided: reorder + per-host cache + cap): check `typ`, `aud`, `htm`, `htu`, `iat`, `sid`, `ath` and `Poppy-Version` on the UNVERIFIED token before the block list and any fetch; negative-cache failures per host; cap cache-miss metadata fetches per store (config `brocode_poppy/session/max_fetches_per_minute`, default 30) → 429 with `Retry-After`.
+- F4 unbounded Session rows (decided: per-agent cap + short TTL): cap new Sessions per client_id per hour (config `brocode_poppy/session/max_new_sessions_per_hour`, default 1000; beyond it `invalid_session`), indexed count; Sessions seen only once deleted after 24 h; cron deletes in batches.
+- F5 tasks endpoint also requires `brocode_poppy/general/enabled`.
+- F6 64 KB cap independent of libcurl version (progress callback abort).
+- F7 also refuse NAT64 local-use `64:ff9b:1::/48`.
+- F8 `sid`/version patterns anchored with `\z` (no trailing newline).
+- F9 tests: PS384 Session JWT refused, malformed sid, missing jti, array aud, missing cnf; refusal tests assert which check refused; a pin test that fails for F1.
+- F10 unknown delegation `kid` refetches the JWKS once (subject to the F3 cap); debug log of client_id + failure code (never tokens).
+Not changed (declined to judge): Varnish/CDN and `PHPSESSID` on poppy.json, blocklist variants of a client_id, `htu` normalization, Sessions shared across store views on one domain.
+
 ## Out of scope
 
 - Verifying the header on website pages and on the angeo UCP endpoints (they use no Session claims).
@@ -172,6 +186,7 @@ requires.
 - 6. Session records + cron — subagent `general-purpose` · sonnet, foreground — **done 2026-11-19**: 10 tests (red first), table created by `setup:upgrade`, real DB round trip (continue, other user_id → invalid_session, ended → session_ended, cron delete) with 0 rows left. Key changed to `sha256(client_id \n sid)`. Added on review: values longer than their columns (client_id 2048, user_id/agent_id 255; spec sets no limit) → `invalid_session` before any write. 107 module tests green, phpcs 0/0, PHPStan L8 clean, DI compile OK.
 - 7. Tasks endpoint + wiring — inline — **done 2026-11-19**: test red first (missing `tasks` key), 108 tests green, phpcs 0/0, PHPStan L8 clean, DI compile OK. Live: sessions off → 404; on → `tasks.endpoint` in poppy.json (link base URL + `poppy/v1/tasks`, so store code/base path match router and `htu`); no or garbage header → 400 `invalid_session` (`no-store, private`); Bearer → 401 `invalid_token`; not cached by FPC. Admin group "Personal Agents": enabled, blocked/allowed client_ids.
 - 8. Validator end-to-end — inline — **done 2026-11-19**: exit 0; Foundation 38 passed / 0 failed, Interfaces 2 / 0. All 24 `session.*` checks, `token.in-url`, `tasks.response`, `tasks.alternative-references` pass. Skipped by the validator's design: `session.invalid-everywhere` (needs a conversation, feedback or browser endpoint) and `token.invented` (issuerless Company, no account access); the plan's "token.invented passes" was wrong for an issuerless Company. DB: 2 Sessions for the test agent (start+continue share a sid, new-session adds one). Sandbox-only: test agent in `pub/poppy-test/`, `brocode_poppy/allow_private_addresses` in env.php.
-- 9. Quality gate + review — reviewer subagent `general-purpose` · opus · xhigh (security-relevant verification code, reviewing another agent's output) — done: no blocking findings; phpunit/phpcs/phpstan as in step 9.
+- 9. Quality gate + review — **review done 2026-11-19**: ship after fixes, findings F1–F10 → step 10 — reviewer subagent `general-purpose` · opus · xhigh (security-relevant verification code, reviewing another agent's output) — done: no blocking findings; phpunit/phpcs/phpstan as in step 9.
 
 Steps run in sequence: they share one repo and one sandbox, so no worktrees.
+- 10. Review fixes — subagent `general-purpose` · opus, foreground — done: every F1–F10 item has a test that failed first; module tests green; phpcs 0/0; PHPStan L8; DI compile; validator still exit 0 with 40 pass.
